@@ -61,17 +61,19 @@ The Proof of Concept demonstrates:
 - Local Router LLM
 - Primary Router
 - Fallback Router
+- Deterministic Default Router (non-AI terminal fallback)
 - Routing Engine
 - Conversation State Manager
-- Model Registry
+- Model Registry (with abstract provider capability descriptors)
 - Provider Dispatcher
 - Provider Adapters
 - Decision Validator
 - Response Gateway
-- Configurable retry limits
-- Configuration-based provider mapping
+- Deterministic, explicit retry mechanism with bounded retry limits
+- Configuration-based provider mapping and capability descriptors
 - FastAPI API layer
 - Unit tests
+- Router routing-quality evaluation set
 
 ---
 
@@ -116,6 +118,11 @@ Providers should be replaceable through configuration only.
 
 Only the Router LLM performs intelligent decision making.
 
+The Router role has a Primary and a Fallback implementation, but **only one Router instance
+is active per decision** — the Fallback is a standby engaged only when the Primary fails,
+never concurrently. The terminal tier (Deterministic Default Router) is a non-AI rule. So at
+most one intelligent decision is ever in flight.
+
 All remaining components remain deterministic.
 
 ---
@@ -142,9 +149,16 @@ No Routing Engine modifications should be required.
 
 ## Security
 
-The client must never know which provider generated the response.
+The platform aims, on a **best-effort** basis, to prevent the client from knowing which
+provider generated the response. This uses a two-layer defense:
 
-All provider-specific references are removed before the response leaves the platform.
+- **Primary defense:** each Provider Adapter injects a system prompt instructing the model
+  not to reveal its identity, vendor, or model name.
+- **Secondary defense:** the Response Gateway applies deterministic best-effort filtering of
+  known identity strings before the response leaves the platform.
+
+This is best-effort rather than absolute, because a language model can self-identify in
+unbounded ways.
 
 ---
 
@@ -152,13 +166,16 @@ All provider-specific references are removed before the response leaves the plat
 
 The Proof of Concept is considered successful if it demonstrates:
 
-- Router successfully selects providers
+- Router selects providers using their capability descriptors and meets the routing-quality
+  acceptance threshold (see Testing Strategy)
 - Provider abstraction works
-- Retry mechanism functions correctly
-- Retry limits are enforced
-- Fallback Router activates automatically
-- Conversation state is maintained correctly
-- Response Gateway removes provider identity leakage
+- Deterministic retry mechanism functions correctly
+- Retry limits are enforced and the retry loop always terminates
+- Fallback Router activates automatically, and the Deterministic Default Router guarantees a
+  final decision if both AI routers fail
+- Conversation state is maintained correctly (routing/retry bookkeeping)
+- Response Gateway provides best-effort removal of provider identity leakage, backed by the
+  adapter identity-hiding system prompt
 - Providers can be replaced without modifying routing logic
 
 ---

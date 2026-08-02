@@ -32,13 +32,14 @@ The long-term vision is to develop an intelligent, provider-agnostic routing pla
 
 The current Proof of Concept demonstrates:
 
-- Intelligent routing using a local Router LLM
+- Intelligent routing using a local Router LLM, informed by abstract provider capability
+  descriptors
 - Provider abstraction
-- Conversation state management
-- Retry mechanism
-- Fallback router
-- Response Gateway
-- Configuration-driven provider mapping
+- Conversation state management (routing/retry bookkeeping)
+- Deterministic, explicit retry mechanism (bounded, always terminates)
+- Fallback router plus a deterministic terminal fallback
+- Best-effort provider identity masking (adapter system prompt + Response Gateway)
+- Configuration-driven provider mapping and capability descriptors
 - Modular architecture
 
 This serves as the foundation for all future enhancements.
@@ -134,7 +135,8 @@ Improve routing quality.
 
 ## Dynamic Provider Metadata
 
-Replace static provider information with runtime metadata.
+The POC already ships **static** abstract capability descriptors (strengths, speed_tier,
+context_size) in the Model Registry. This phase upgrades them to **runtime** metadata.
 
 Examples
 

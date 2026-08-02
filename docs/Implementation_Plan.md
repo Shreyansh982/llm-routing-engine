@@ -127,10 +127,11 @@ Implement shared project infrastructure.
 
 Implement
 
-- RouterRequest
+- RouterRequest (includes `available_providers` with abstract capability descriptors)
 - RouterDecision
 - ProviderRequest
 - ProviderResponse
+- ProviderCapability (strengths, speed_tier, context_size)
 
 Create
 
@@ -236,9 +237,11 @@ Implement routing intelligence.
 
 ## Components
 
-Primary Router
+Primary Router (active by default)
 
-Fallback Router
+Fallback Router (standby)
+
+Deterministic Default Router (non-AI terminal tier)
 
 ---
 
@@ -262,11 +265,22 @@ CLARIFY
 STOP
 ```
 
+The Primary and Fallback Routers must use **schema-constrained / structured output** to
+produce the decision (JSON schema, grammar, or the runtime's structured-output mode), with a
+single bounded re-parse/repair attempt before the decision is treated as a failure.
+
+The Router receives providers **with abstract capability descriptors** (from the Registry)
+so it can route on capability, not opaque IDs.
+
+The Deterministic Default Router contains no reasoning: it selects the first enabled,
+non-excluded provider in Registry order, guaranteeing the ladder always terminates.
+
 ---
 
 ## Success Criteria
 
-Router consistently returns valid decisions.
+Router consistently returns valid, schema-conformant decisions, and the Deterministic
+Default Router produces a valid decision whenever both AI routers fail.
 
 ---
 
@@ -315,11 +329,13 @@ Provider Adapter
 
 Dispatcher
 
-- Resolve provider
+- Resolve provider metadata via the Registry, then instantiate the adapter
+  (Registry owns metadata; Dispatcher owns adapter instantiation)
 
 Adapter
 
-- Generate response
+- Generate response (receives the prompt only — no routing internals)
+- Inject the identity-hiding system prompt (Layer 1 identity defense)
 - Normalize response
 - Handle provider errors
 
@@ -341,13 +357,16 @@ Implement platform response policy.
 
 ## Responsibilities
 
-Remove
+Best-effort removal of
 
-- Provider names
+- Provider names (known strings/branding)
 - Internal metadata
 - Routing information
 
 Normalize output.
+
+This is Layer 2 (secondary) of the identity defense; Layer 1 is the adapter system prompt
+implemented in Milestone 7.
 
 ---
 
@@ -369,7 +388,8 @@ I recommend...
 
 ## Success Criteria
 
-Users cannot determine which provider generated the response.
+On a best-effort basis, users cannot readily determine which provider generated the
+response (system prompt + Gateway filtering together).
 
 ---
 
@@ -471,32 +491,25 @@ All tests pass successfully.
 
 # Project Folder Structure
 
+This mirrors the structure in the project README (see README → Repository Structure for the
+per-package descriptions). `core/` holds shared base interfaces only; `routing/` holds the
+concrete Routing Engine.
+
 ```
 router_engine/
 
-├── api/
-│
-├── config/
-│
-├── core/
-│
-├── routing/
-│
-├── routers/
-│
-├── providers/
-│
-├── gateway/
-│
-├── registry/
-│
-├── state/
-│
-├── validation/
-│
-├── schemas/
-│
-├── tests/
+├── api/          # FastAPI entry point
+├── config/       # configuration loading + provider config
+├── core/         # shared base interfaces (no business logic)
+├── schemas/      # Pydantic models
+├── routing/      # Routing Engine (orchestrator)
+├── routers/      # Primary / Fallback / Deterministic Default routers
+├── validation/   # Decision Validator
+├── registry/     # Model Registry (metadata + capabilities)
+├── providers/    # Provider Dispatcher + Adapters
+├── gateway/      # Response Gateway
+├── state/        # Conversation State Manager
+├── tests/        # all test suites incl. routing eval
 │
 └── README.md
 ```
@@ -536,6 +549,10 @@ Fallback Router
 
 ↓
 
+Deterministic Default Router
+
+↓
+
 Decision Validator
 
 ↓
@@ -571,11 +588,14 @@ Each component should compile and pass its tests before moving to the next stage
 
 | Risk | Mitigation |
 |------|------------|
-| Invalid router output | Decision Validator |
+| Invalid / malformed router output | Structured output + Decision Validator |
+| Uninformed routing (opaque IDs) | Abstract capability descriptors in Router Request |
 | Router unavailable | Fallback Router |
-| Infinite retries | Retry limit |
+| Both AI routers fail | Deterministic Default Router |
+| Infinite retries | Retry limit + provider-pool-exhaustion guard |
 | Provider failure | Provider abstraction |
-| Provider identity leakage | Response Gateway |
+| Provider identity leakage | Adapter system prompt (primary) + Response Gateway (best-effort) |
+| Unmeasured routing quality | Routing-quality evaluation set (Testing Strategy) |
 | Tight coupling | Interface-based architecture |
 
 ---
@@ -603,11 +623,14 @@ At the completion of the POC, the following deliverables should be available:
 The Proof of Concept is considered complete when:
 
 - All milestones are implemented.
-- The Routing Engine successfully routes requests.
-- Fallback Router functions correctly.
-- Retry mechanism operates as expected.
+- The Routing Engine successfully routes requests using provider capability descriptors.
+- Fallback Router functions correctly, and the Deterministic Default Router guarantees a
+  final decision if both AI routers fail.
+- Deterministic retry mechanism operates as expected and always terminates.
 - Provider abstraction allows provider replacement without code changes.
-- Response Gateway prevents provider identity leakage.
+- Response Gateway provides best-effort prevention of provider identity leakage (backed by
+  the adapter system prompt).
+- The routing-quality evaluation set meets its acceptance threshold.
 - All automated tests pass.
 - The application can be demonstrated end-to-end using the local Router and configured providers.
 

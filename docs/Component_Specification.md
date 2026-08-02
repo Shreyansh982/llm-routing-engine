@@ -34,12 +34,18 @@ This document serves as the implementation specification for the POC.
 | Conversation State Manager | ❌ | Runtime state |
 | Model Registry | ❌ | Provider metadata |
 | Router Interface | ❌ | Router abstraction |
-| Primary Router | ✅ | Intelligent routing |
-| Fallback Router | ✅ | Backup routing |
+| Primary Router | ✅ | Intelligent routing (active by default) |
+| Fallback Router | ✅ | Backup routing (standby; active only on Primary failure) |
+| Deterministic Default Router | ❌ | Non-AI terminal routing tier |
 | Decision Validator | ❌ | Validate router output |
 | Provider Dispatcher | ❌ | Provider selection |
 | Provider Adapter | ❌ | Provider communication |
 | Response Gateway | ❌ | Response sanitization |
+
+The Primary and Fallback Routers are two implementations of a **single AI role** and are
+mutually exclusive at runtime — at most one is active per decision. The Deterministic
+Default Router is a non-AI safety net. Thus the "single AI decision-maker" principle holds:
+only one intelligent decision is ever in flight.
 
 ---
 
@@ -164,6 +170,11 @@ RoutingResponse
 
 Stores runtime information for each conversation.
 
+**Scope (POC):** this is *routing/retry bookkeeping*, not full multi-turn memory. It holds a
+single `original_query`, the most recent `previous_response`, and the retry accounting
+fields. Rich multi-turn history is out of scope for the POC (see roadmap: persistent
+conversation storage).
+
 ---
 
 ## Responsibilities
@@ -243,16 +254,24 @@ Store
 - Provider IDs
 - Enabled status
 - Configuration
-- Provider implementation
+- Abstract capability descriptors (strengths, speed_tier, context_size)
+- ID → real-provider mapping (single owner)
+
+The Registry owns provider **metadata only**. It does **not** instantiate adapters — that is
+the Provider Dispatcher's job. This keeps a clean split: Registry answers "what exists and
+what is it good at"; Dispatcher answers "how do I call it."
+
+Capability descriptors are read by the Routing Engine and injected into the Router Request
+so the Router can route on capability rather than on opaque IDs.
 
 ---
 
 ## Example
 
 ```python
-provider_a
+provider_a  # {strengths:[reasoning, coding], speed_tier:standard, context_size:large}
 
-provider_b
+provider_b  # {strengths:[creative_writing, summarization], speed_tier:fast, context_size:standard}
 
 provider_c
 ```
@@ -262,16 +281,21 @@ provider_c
 ## Public Interface
 
 ```python
-get_provider()
+get_provider()          # includes capability descriptors
 
 list_providers()
 
 is_enabled()
 
-register()
+register()               # startup-time population from configuration
 
-disable()
+disable()                # startup-time / config-driven
 ```
+
+`register()` and `disable()` are used to **populate the Registry from configuration at
+startup**. In the POC the Registry is effectively read-only afterward; there is no runtime
+provider-management API (that is deferred — see `POST /providers/register` under Future
+Endpoints).
 
 ---
 
@@ -334,7 +358,8 @@ Given
 - Query
 - Previous response
 - Retry state
-- Available providers
+- Available providers **with abstract capability descriptors** (strengths, speed_tier,
+  context_size)
 
 Return
 
@@ -342,6 +367,30 @@ Return
 - Provider
 - Confidence
 - Reason
+
+The capability descriptors are what allow an *informed* choice; without them the Router
+would be guessing between opaque IDs.
+
+---
+
+## Structured Output Requirement
+
+The Router **must** emit its decision using schema-constrained / structured output — a JSON
+schema, grammar-constrained decoding, or the model runtime's structured/JSON output mode.
+Emitting free-form prose that happens to contain JSON is not acceptable. A single bounded
+re-parse/repair attempt is permitted; if it still fails, the decision is treated as a
+failure and the next tier of the ladder is engaged.
+
+---
+
+## Action Semantics
+
+| Action | Engine behavior |
+|--------|-----------------|
+| ANSWER | Dispatch to `selected_provider` |
+| CLARIFY | Return clarifying question to client; no dispatch; `attempt_count` unchanged |
+| RETRY | Re-route with previous provider excluded, subject to retry guards |
+| STOP | Return terminal message; no dispatch |
 
 ---
 
@@ -368,7 +417,7 @@ decide()
 
 ## Dependencies
 
-Local Router Model
+Local Router Model (invoked in structured-output mode)
 
 ---
 
@@ -394,11 +443,63 @@ Invalid provider
 
 Invalid action
 
+These conditions are *detected by the Decision Validator* (or by transport-level
+timeout/unavailability) after the Primary Router runs.
+
+---
+
+## Runtime Exclusivity
+
+The Fallback Router is a **standby**. It runs only when the Primary Router's decision cannot
+be used, and never concurrently with the Primary Router. This preserves the single active
+AI decision-maker principle.
+
 ---
 
 ## Interface
 
-Same as Primary Router.
+Same as Primary Router (including the structured-output requirement).
+
+---
+
+# 7a. Deterministic Default Router
+
+## Purpose
+
+A **non-AI** terminal routing tier that guarantees the routing ladder always terminates,
+even if both the Primary and Fallback Routers fail.
+
+---
+
+## Behavior
+
+Deterministic rule only — no reasoning:
+
+- Select the first **enabled, non-excluded** provider in Registry order.
+- If no such provider exists, return no decision and the engine raises a controlled
+  `ROUTER_FAILURE` (HTTP 503).
+
+---
+
+## Complete Failure Ladder
+
+```
+Primary Router (AI)
+   → Fallback Router (AI)
+      → Deterministic Default Router (non-AI)
+         → Controlled error (503)
+```
+
+Each AI tier's output is validated; on failure the engine escalates to the next tier and
+never re-enters a prior tier, so the ladder is strictly finite.
+
+---
+
+## Public Interface
+
+```python
+select_default()
+```
 
 ---
 
@@ -440,7 +541,10 @@ validate()
 
 ## Failure
 
-Raise ValidationError
+Signals an invalid decision (e.g. `ValidationError`). The Routing Engine reacts by escalating
+to the next tier of the Failure Ladder — Primary → Fallback → Deterministic Default → 503 —
+rather than surfacing the error immediately. A validation failure is therefore the mechanism
+that *triggers* the fallback, not a dead end.
 
 ---
 
@@ -448,17 +552,21 @@ Raise ValidationError
 
 ## Purpose
 
-Convert Provider IDs into Provider implementations.
+Convert a validated Provider ID into a concrete Provider Adapter and invoke it.
+
+**Boundary with the Registry:** the Dispatcher asks the Registry *whether* a provider exists
+and is enabled (metadata), then owns the step the Registry does not — resolving and
+instantiating the adapter. The Registry never instantiates adapters.
 
 ---
 
 ## Responsibilities
 
-Lookup provider
+Look up provider metadata (via Registry)
 
-Instantiate adapter
+Resolve and instantiate the adapter
 
-Forward request
+Forward request (prompt only — no routing internals)
 
 Return response
 
@@ -492,6 +600,9 @@ Encapsulate provider-specific implementation.
 
 Generate responses
 
+Inject the identity-hiding system prompt (Layer 1 of the two-layer identity defense —
+instructs the model not to reveal its identity/vendor/model)
+
 Normalize outputs
 
 Handle provider exceptions
@@ -503,7 +614,7 @@ Health checks
 ## Interface
 
 ```python
-generate()
+generate(prompt)   # receives only the prompt — never excluded_providers / attempt_count
 
 health()
 
@@ -536,15 +647,20 @@ No Routing Engine changes required.
 
 ## Purpose
 
-Guarantee platform-compliant responses.
+Produce platform-compliant responses on a **best-effort** basis.
 
-Every response generated by a provider MUST pass through this component.
+Every response generated by a provider MUST pass through this component. It is **Layer 2**
+(secondary) of the two-layer identity defense; **Layer 1** is the identity-hiding system
+prompt injected by each Provider Adapter, which prevents most leakage at the source.
+
+Because a language model can self-identify in unbounded ways, the Gateway does not promise
+perfect masking — it applies deterministic best-effort filtering of known identity strings.
 
 ---
 
 ## Responsibilities
 
-Remove provider identity
+Best-effort removal of provider identity (known strings/branding)
 
 Remove provider metadata
 
@@ -669,6 +785,7 @@ Always through Response Gateway
 | Routing Engine | Retry lifecycle |
 | Router | Routing decision |
 | Fallback Router | Primary failure |
+| Deterministic Default Router | Both AI routers failed |
 | Validator | Invalid decision |
 | Dispatcher | Provider lookup |
 | Adapter | Provider errors |

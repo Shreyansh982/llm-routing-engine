@@ -32,7 +32,7 @@ The testing process should verify that:
 - Retry mechanisms function correctly.
 - Fallback routing activates automatically.
 - Provider abstraction remains independent of vendor implementations.
-- Provider identities are never exposed.
+- Provider identities are masked on a best-effort basis (adapter system prompt + Gateway).
 - Invalid states are handled gracefully.
 
 ---
@@ -148,9 +148,33 @@ Unknown provider
 
 Invalid action
 
+Structured-output conformance (decision matches the required schema)
+
+Capability-aware selection (given descriptors, a coding query prefers a coding-strong
+provider)
+
 Expected Result
 
-Router returns valid RouterDecision.
+Router returns a schema-conformant RouterDecision.
+
+---
+
+# Deterministic Default Router
+
+## Test Cases
+
+Selects first enabled, non-excluded provider
+
+Skips disabled providers
+
+Skips excluded providers
+
+No eligible provider remains
+
+Expected Result
+
+Returns the correct deterministic provider, or signals "no provider available" so the engine
+returns a controlled 503. Never invokes an AI model.
 
 ---
 
@@ -367,11 +391,11 @@ Provider A
 
 ↓
 
-User dissatisfied
+Explicit retry signal (retry: true)
 
 ↓
 
-Retry
+Provider A excluded, attempt_count++
 
 ↓
 
@@ -388,7 +412,7 @@ User
 
 Expected Result
 
-Retry succeeds.
+Retry succeeds deterministically (no satisfaction inference).
 
 ---
 
@@ -470,7 +494,7 @@ Graceful failure.
 
 ## Test 7
 
-Gateway
+Gateway (best-effort masking of a known identity string)
 
 Provider returns
 
@@ -483,6 +507,61 @@ Gateway returns
 ```
 I am an AI assistant.
 ```
+
+Note: this validates best-effort masking of *known* identity strings. The primary defense
+(adapter system prompt) is validated separately at the adapter level.
+
+---
+
+## Test 8
+
+Complete Failure Ladder
+
+```
+Primary Router  → invalid decision
+        ↓
+Fallback Router → invalid decision
+        ↓
+Deterministic Default Router → valid provider
+        ↓
+Gateway → User
+```
+
+Expected Result
+
+The ladder escalates deterministically and terminates. If no provider is eligible at the
+default tier, a controlled 503 (ROUTER_FAILURE) is returned.
+
+---
+
+## Test 9
+
+Deterministic Retry
+
+```
+POST /chat (retry: true)
+        ↓
+previous provider excluded
+        ↓
+attempt_count++
+        ↓
+Router re-invoked with reduced provider set
+```
+
+Expected Result
+
+Retry re-routes deterministically; no satisfaction inference occurs.
+
+---
+
+## Test 10
+
+Provider Pool Exhaustion
+
+Expected Result
+
+When every enabled provider is excluded, the engine returns `STOP` without invoking the
+Router. No infinite loop occurs.
 
 ---
 
@@ -595,6 +674,51 @@ Logs must never expose
 
 ---
 
+# Router Routing-Quality Evaluation
+
+Structural tests confirm the Router returns *valid* decisions; they do not confirm the
+decisions are *good*. Because the Router is the single intelligent component, its routing
+quality is evaluated explicitly against a small, fixed dataset.
+
+## Evaluation Dataset
+
+A small curated set of labeled cases (target: **15–20 cases** for the POC). Each case pairs a
+representative query with the capability profile it should be routed to, given a fixed set of
+provider capability descriptors.
+
+```json
+[
+  {
+    "query":"Write a Python function to reverse a linked list.",
+    "expected_strength":"coding"
+  },
+  {
+    "query":"Summarize this three-page article into five bullet points.",
+    "expected_strength":"summarization"
+  },
+  {
+    "query":"Write a short whimsical poem about autumn.",
+    "expected_strength":"creative_writing"
+  }
+]
+```
+
+Labels reference **abstract capabilities** (e.g. `coding`, `summarization`,
+`creative_writing`), never vendor names, preserving provider-agnosticism. The dataset is
+hand-authored — no ML training, embeddings, or classifiers are involved.
+
+## Acceptance Criteria
+
+- **Top-1 capability match ≥ 80%** — for at least 80% of cases, the selected provider's
+  descriptor includes the expected strength.
+- **100% schema conformance** — every decision is valid structured output.
+- **No excluded/disabled provider is ever selected** across the dataset.
+
+A run below the top-1 threshold is treated as a routing-prompt quality regression to be
+addressed (e.g. by refining the Router prompt), not as an architectural change.
+
+---
+
 # Test Coverage Goals
 
 | Component | Target Coverage |
@@ -621,13 +745,15 @@ The POC is considered tested successfully if:
 
 - API endpoints work correctly.
 - Conversation state behaves correctly.
-- Router produces valid decisions.
+- Router produces valid, schema-conformant decisions.
+- Router routing-quality evaluation meets its acceptance threshold.
 - Fallback Router activates when required.
-- Retry mechanism functions correctly.
-- Retry limit is enforced.
+- Deterministic Default Router guarantees a final decision when both AI routers fail.
+- Deterministic retry mechanism functions correctly and always terminates.
+- Retry limit and provider-pool-exhaustion guard are enforced.
 - Provider abstraction works.
 - Dispatcher resolves providers correctly.
-- Response Gateway removes provider identity.
+- Response Gateway removes known provider identity strings (best-effort).
 - Invalid Router decisions never reach providers.
 - Provider failures are handled gracefully.
 - All automated tests pass.

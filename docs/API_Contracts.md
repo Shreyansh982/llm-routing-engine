@@ -21,7 +21,7 @@ All routing decisions are delegated to the Routing Engine.
 # API Design Principles
 
 - RESTful
-- Stateless (conversation state handled internally)
+- Stateful (conversation state is managed server-side by the Routing Engine)
 - JSON request/response
 - Consistent response structure
 - Predictable HTTP status codes
@@ -88,7 +88,8 @@ Primary endpoint for interacting with the Routing Engine.
 ```json
 {
     "conversation_id":"12345",
-    "message":"Explain OAuth2 in simple terms."
+    "message":"Explain OAuth2 in simple terms.",
+    "retry": false
 }
 ```
 
@@ -96,10 +97,34 @@ Primary endpoint for interacting with the Routing Engine.
 
 ## Request Fields
 
-| Field | Type | Required |
-|--------|------|----------|
-| conversation_id | string | Yes |
-| message | string | Yes |
+| Field | Type | Required | Default |
+|--------|------|----------|---------|
+| conversation_id | string | Yes | — |
+| message | string | Yes | — |
+| retry | boolean | No | false |
+
+---
+
+## Retry Semantics
+
+Retry is triggered by an **explicit, deterministic client signal**, not by any inference
+of "user satisfaction." There is no sentiment analysis or dissatisfaction detection in the
+POC.
+
+- When `retry` is `false` (default), the request is routed normally.
+- When `retry` is `true`, the Routing Engine treats it as a deterministic instruction to
+  re-route the **same** `original_query`:
+  1. It adds the previously used provider to `excluded_providers`.
+  2. It increments `attempt_count`.
+  3. It re-invokes the Router with the reduced provider set.
+
+Before re-invoking the Router, the engine enforces two deterministic guards that make an
+infinite retry loop impossible:
+
+- If `attempt_count >= max_attempts`, the engine returns the `STOP` action **without**
+  invoking the Router.
+- If every enabled provider is already in `excluded_providers` (provider pool exhausted),
+  the engine returns the `STOP` action **without** invoking the Router.
 
 ---
 
@@ -110,10 +135,21 @@ Primary endpoint for interacting with the Routing Engine.
     "success": true,
     "data": {
         "conversation_id":"12345",
+        "action":"ANSWER",
         "response":"OAuth2 is..."
     }
 }
 ```
+
+The `action` field tells the client how to interpret the response:
+
+| action | Meaning | `response` contains |
+|--------|---------|---------------------|
+| ANSWER | A provider answered successfully | The assistant answer |
+| CLARIFY | The Router needs more information before routing | A clarifying question for the user |
+| STOP | Retry limit or provider pool exhausted; no further routing | A terminal message (e.g. "Unable to produce a better response.") |
+
+For `CLARIFY` and `STOP`, no provider is dispatched and `attempt_count` is not incremented.
 
 ---
 
@@ -313,17 +349,46 @@ Clients never interact with it.
     ],
     "available_providers":[
         {
-            "id":"provider_a"
+            "id":"provider_a",
+            "capabilities":{
+                "strengths":["reasoning","coding"],
+                "speed_tier":"standard",
+                "context_size":"large"
+            }
         },
         {
-            "id":"provider_b"
-        },
-        {
-            "id":"provider_c"
+            "id":"provider_b",
+            "capabilities":{
+                "strengths":["creative_writing","summarization"],
+                "speed_tier":"fast",
+                "context_size":"standard"
+            }
         }
     ]
 }
 ```
+
+### Provider Capabilities
+
+Each provider entry carries an **abstract capability descriptor** so the Router can make an
+informed decision instead of guessing between opaque IDs. These descriptors are:
+
+- **Vendor-neutral** — they never contain a provider brand, model name, or endpoint. The
+  Router still only sees `provider_a`, `provider_b`, etc.
+- **Sourced from the Model Registry** — the Routing Engine reads capabilities from the
+  Registry and injects them into the Router Request. The Registry remains the single owner
+  of the ID → real-provider mapping.
+
+Descriptor fields (POC):
+
+| Field | Type | Example values |
+|-------|------|----------------|
+| strengths | string[] | reasoning, coding, creative_writing, summarization |
+| speed_tier | string | fast, standard |
+| context_size | string | standard, large |
+
+The vocabulary is a fixed, configuration-defined enumeration. No embeddings, classifiers,
+or dynamic scoring are involved.
 
 ---
 
@@ -338,6 +403,10 @@ Clients never interact with it.
 }
 ```
 
+The Router **must** emit this object using schema-constrained / structured output (see
+Component Specification — Primary Router). Free-form text that merely embeds JSON is not
+acceptable.
+
 ---
 
 # Provider Adapter Contract
@@ -348,10 +417,13 @@ Every Provider Adapter must implement the same interface.
 
 ```python
 generate(
-    prompt,
-    conversation_state
+    prompt
 )
 ```
+
+The adapter receives **only** the prompt required to produce a response. It never receives
+routing internals such as `excluded_providers` or `attempt_count`, keeping the provider
+boundary free of routing concerns.
 
 ---
 
@@ -385,12 +457,15 @@ generate(
 }
 ```
 
-The output must never reveal
+The Response Gateway applies **best-effort** masking and should strip, wherever detectable:
 
 - Provider name
 - Internal metadata
 - Provider-specific branding
 - Internal routing information
+
+This is a best-effort guarantee, not an absolute one (see Security Considerations for the
+two-layer defense model).
 
 ---
 
@@ -425,7 +500,19 @@ The output must never reveal
 
 # Security Considerations
 
-The API must never expose:
+Provider-identity hiding uses a **two-layer, best-effort defense**. It is not claimed to be
+an absolute guarantee, because a language model can self-identify in unbounded ways.
+
+**Layer 1 — Primary defense (prevention).** Every Provider Adapter injects a system prompt
+instructing the underlying model not to reveal its identity, vendor, or model name. This
+stops most leakage at the source.
+
+**Layer 2 — Secondary defense (masking).** The Response Gateway applies deterministic
+best-effort filtering of known identity strings and branding before the response leaves the
+platform.
+
+The following should not appear in the response; the two layers work together to prevent
+their exposure on a best-effort basis:
 
 - Router model name
 - Provider vendor name
@@ -434,7 +521,7 @@ The API must never expose:
 - Internal routing decisions
 - Retry implementation details
 
-The client should only receive the assistant response.
+The client should normally receive only the assistant response.
 
 ---
 

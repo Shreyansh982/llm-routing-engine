@@ -26,15 +26,15 @@ The system is designed around modular software engineering principles, making it
 
 # Key Features
 
-- 🤖 Intelligent routing using a local Router LLM
-- 🔄 Automatic retry with alternate providers
-- 🛡️ Fallback Router for increased reliability
+- 🤖 Intelligent routing using a local Router LLM, informed by abstract provider capabilities
+- 🔄 Deterministic, explicit retry with alternate providers
+- 🛡️ Fallback Router plus a deterministic terminal fallback (no infinite loops)
 - 🔌 Provider-agnostic architecture
 - 🧩 Modular component design
-- 🔒 Provider identity masking through Response Gateway
-- 📋 Conversation state management
+- 🔒 Best-effort provider identity masking (adapter system prompt + Response Gateway)
+- 📋 Conversation state management (routing/retry bookkeeping)
 - ⚙️ Configuration-driven provider registry
-- 🧪 Comprehensive testing strategy
+- 🧪 Comprehensive testing strategy with a routing-quality evaluation set
 - 📦 Clean Architecture with SOLID principles
 
 ---
@@ -87,24 +87,28 @@ Conversation State             Model Registry               Router Interface
 ```
 router_engine/
 
-├── api/
-├── config/
-├── core/
-├── gateway/
-├── providers/
-├── registry/
-├── routers/
-├── routing/
-├── schemas/
-├── state/
-├── tests/
-├── validation/
+├── api/          # FastAPI entry point and route handlers
+├── config/       # configuration loading (.env → settings), provider config
+├── core/         # shared base interfaces (Router, Provider) — no business logic
+├── schemas/      # Pydantic models (RouterRequest, RouterDecision, Provider*, ...)
+├── routing/      # Routing Engine — the deterministic orchestrator
+├── routers/      # Primary, Fallback, and Deterministic Default Router implementations
+├── validation/   # Decision Validator
+├── registry/     # Model Registry (provider metadata + capability descriptors)
+├── providers/    # Provider Dispatcher and Provider Adapters
+├── gateway/      # Response Gateway
+├── state/        # Conversation State Manager
+├── tests/        # unit, component, integration, failure, and routing-eval tests
 │
 ├── .env.example
 ├── pyproject.toml
 ├── README.md
 └── docs/
 ```
+
+`core/` holds only the shared abstractions (base interfaces) that other packages depend on;
+`routing/` holds the concrete Routing Engine orchestrator. Keeping them separate avoids a
+dependency cycle and keeps `core/` free of business logic.
 
 ---
 
@@ -130,8 +134,9 @@ router_engine/
 | Routing Engine | Request lifecycle management |
 | Conversation State Manager | Runtime conversation state |
 | Model Registry | Provider metadata |
-| Router | Intelligent routing decisions |
-| Fallback Router | Backup routing |
+| Router | Intelligent routing decisions (active by default) |
+| Fallback Router | Backup routing (standby; on Primary failure) |
+| Deterministic Default Router | Non-AI terminal fallback |
 | Decision Validator | Validate routing decisions |
 | Provider Dispatcher | Resolve provider adapters |
 | Provider Adapter | Provider communication |
@@ -177,14 +182,15 @@ Response Gateway
 User
 ```
 
-If the user is dissatisfied:
+On an **explicit** retry signal — the client sends `POST /chat` with `retry: true`, or the
+Router returns the `RETRY` action — the engine deterministically re-routes:
 
 ```
-attempt++
+exclude previous provider
 
 ↓
 
-exclude previous provider
+attempt++
 
 ↓
 
@@ -203,10 +209,13 @@ Response Gateway
 User
 ```
 
-The retry process continues until:
+There is no inference of "user satisfaction." The retry process is bounded and always
+terminates when either guard fires:
 
-- A satisfactory response is produced, or
-- The maximum retry limit is reached.
+- `attempt_count >= max_attempts`, or
+- every enabled provider is already excluded (provider pool exhausted).
+
+When a guard fires, the engine returns `STOP` without invoking the Router.
 
 ---
 
@@ -216,7 +225,9 @@ The Routing Engine is built upon the following principles:
 
 ### Single Intelligent Component
 
-Only the Router LLM performs intelligent decision making.
+Only the Router LLM performs intelligent decision making. The Primary and Fallback Routers
+are one AI role with two implementations — only one is active per decision, never both. The
+terminal Deterministic Default Router is a non-AI rule.
 
 All remaining components are deterministic.
 
@@ -354,13 +365,13 @@ Project documentation is available in the `docs/` directory.
 
 | Document | Description |
 |----------|-------------|
-| 01_Project_Overview.md | Project vision and scope |
-| 02_System_Architecture.md | Complete architecture |
-| 03_Component_Specification.md | Component specifications |
-| 04_API_Contracts.md | API definitions |
-| 05_Implementation_Plan.md | Development roadmap |
-| 06_Testing_Strategy.md | Testing approach |
-| 07_Future_Roadmap.md | Future enhancements |
+| Project_Overview.md | Project vision and scope |
+| System_Architecture.md | Complete architecture |
+| Component_Specification.md | Component specifications |
+| API_Contracts.md | API definitions |
+| Implementation_Plan.md | Development roadmap |
+| Testing_Strategy.md | Testing approach |
+| Future_Roadmap.md | Future enhancements |
 
 ---
 
