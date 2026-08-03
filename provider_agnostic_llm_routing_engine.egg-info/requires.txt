@@ -2,4 +2,6 @@ fastapi<1.0,>=0.115
 httpx<1.0,>=0.27
 pydantic<3.0,>=2.10
 pydantic-settings<3.0,>=2.6
+plotly<7.0,>=5.24
+streamlit<2.0,>=1.40
 uvicorn[standard]<1.0,>=0.32

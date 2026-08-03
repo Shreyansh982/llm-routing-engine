@@ -22,8 +22,11 @@ def provider(
     return ProviderConfig(
         id=provider_id,
         enabled=enabled,
-        endpoint=f"http://{provider_id}.invalid/chat",
+        backend="openrouter",
+        endpoint=f"http://{provider_id}.invalid/chat/completions",
         model=f"{provider_id}-model",
+        api_key="test-key",
+        timeout=1,
         capabilities=ProviderCapability(strengths=strengths, speed_tier="standard", context_size="large"),
         identity_terms=[provider_id.replace("_", " ")],
     )
@@ -48,11 +51,14 @@ class QueueRouter(BaseRouter):
 class FakeProvider(BaseProvider):
     responses: dict[str, str] = {}
     fail = False
+    failure: Exception | None = None
 
     def __init__(self, config: ProviderConfig, _: float) -> None:
         self.config = config
 
     async def generate(self, prompt: str) -> ProviderResponse:
+        if self.failure is not None:
+            raise self.failure
         if self.fail:
             from providers.adapter import ProviderUnavailableError
 
@@ -77,6 +83,7 @@ def make_engine(
     state = ConversationStateManager()
     FakeProvider.responses = {}
     FakeProvider.fail = False
+    FakeProvider.failure = None
     engine = RoutingEngine(
         state_manager=state,
         registry=registry,

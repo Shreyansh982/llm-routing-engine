@@ -5,13 +5,15 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from core.interfaces import BaseProvider
-from providers.adapter import HTTPProviderAdapter, ProviderUnavailableError
+from providers.adapter import GroqAdapter, OpenRouterAdapter, ProviderUnavailableError
 from registry.model_registry import ModelRegistry, UnknownProviderError
 from schemas.models import ProviderResponse
 
 
 class ProviderDisabledError(RuntimeError):
-    pass
+    failure_stage = "dispatcher"
+    failure_reason = "UNKNOWN"
+    http_status = None
 
 
 ProviderFactory = Callable[..., BaseProvider]
@@ -22,20 +24,31 @@ class ProviderDispatcher:
         self,
         registry: ModelRegistry,
         timeout: float,
-        adapter_factory: ProviderFactory = HTTPProviderAdapter,
+        adapter_factory: ProviderFactory | None = None,
     ) -> None:
         self._registry = registry
         self._timeout = timeout
         self._adapter_factory = adapter_factory
+        self._backend_factories: dict[str, ProviderFactory] = {
+            "openrouter": OpenRouterAdapter,
+            "groq": GroqAdapter,
+        }
 
     def resolve(self, provider_id: str) -> BaseProvider:
         try:
             config = self._registry.get_provider(provider_id)
         except UnknownProviderError as exc:
-            raise ProviderUnavailableError("Selected provider is not registered") from exc
+            raise ProviderUnavailableError(
+                "Selected provider is not registered", failure_stage="dispatcher"
+            ) from exc
         if not config.enabled:
             raise ProviderDisabledError("Selected provider is disabled")
-        return self._adapter_factory(config, self._timeout)
+        factory = self._adapter_factory or self._backend_factories.get(config.backend)
+        if factory is None:
+            raise ProviderUnavailableError(
+                "Selected provider backend is not supported", failure_stage="dispatcher"
+            )
+        return factory(config, config.timeout)
 
     async def dispatch(self, provider_id: str, prompt: str) -> ProviderResponse:
         return await self.resolve(provider_id).generate(prompt)

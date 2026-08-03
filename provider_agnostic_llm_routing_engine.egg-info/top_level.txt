@@ -1,6 +1,7 @@
 api
 config
 core
+dashboard
 gateway
 providers
 registry

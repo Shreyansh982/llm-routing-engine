@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 
 class RouterAction(StrEnum):
@@ -14,6 +14,31 @@ class RouterAction(StrEnum):
     RETRY = "RETRY"
     CLARIFY = "CLARIFY"
     STOP = "STOP"
+
+
+class FailureStage(StrEnum):
+    """The architecture boundary at which a request terminally failed."""
+
+    NONE = "none"
+    PRIMARY_ROUTER = "primary_router"
+    FALLBACK_ROUTER = "fallback_router"
+    DISPATCHER = "dispatcher"
+    PROVIDER = "provider"
+    GATEWAY = "gateway"
+    VALIDATOR = "validator"
+    DEFAULT_ROUTER = "default_router"
+
+
+def http_failure_reason(status_code: int) -> str:
+    """Return a stable, JSON-safe failure reason for an upstream HTTP response."""
+    phrases = {
+        402: "PAYMENT_REQUIRED",
+        404: "MODEL_NOT_FOUND",
+        429: "RATE_LIMIT",
+        500: "INTERNAL_SERVER_ERROR",
+        503: "PROVIDER_UNAVAILABLE",
+    }
+    return f"HTTP_{status_code}_{phrases.get(status_code, 'ERROR')}"
 
 
 class ProviderCapability(BaseModel):
@@ -27,9 +52,11 @@ class ProviderConfig(BaseModel):
 
     id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     enabled: bool = True
+    backend: str = Field(min_length=1)
     endpoint: str = Field(min_length=1)
     model: str = Field(min_length=1)
-    api_key: str | None = None
+    api_key: SecretStr | None = None
+    timeout: float = Field(gt=0)
     capabilities: ProviderCapability
     identity_terms: list[str] = Field(default_factory=list)
 
@@ -105,6 +132,46 @@ class RoutingResponse(BaseModel):
     conversation_id: str
     action: RouterAction
     response: str
+    diagnostics: "RoutingDiagnostics | None" = None
+
+
+class LatencyBreakdown(BaseModel):
+    router_ms: float = Field(ge=0)
+    provider_ms: float = Field(ge=0)
+    gateway_ms: float = Field(ge=0)
+    total_ms: float = Field(ge=0)
+
+
+class RoutingDiagnostics(BaseModel):
+    """Developer-only observability data; never emitted on a normal chat response."""
+
+    developer_mode: bool = True
+    request_id: str
+    timestamp: datetime
+    request_timestamp: datetime
+    completed_at: datetime | None = None
+    router_used: str | None = None
+    selected_provider: str | None = None
+    provider_id: str | None = None
+    backend: str | None = None
+    model: str | None = None
+    provider_backend: str | None = None
+    configured_model: str | None = None
+    routing_reason: str | None = None
+    capabilities_considered: list[AvailableProvider] = Field(default_factory=list)
+    fallback_used: bool = False
+    retry_count: int = Field(ge=0)
+    latency_breakdown: LatencyBreakdown
+    http_status: int | None = None
+    # The public API may intentionally use a controlled status (for example 503).
+    # This field preserves the status returned by the provider backend itself.
+    upstream_http_status: int | None = None
+    failure_stage: FailureStage = FailureStage.NONE
+    # A completed answer has no failure. UNKNOWN is reserved for an actual failure
+    # whose cause could not be classified.
+    failure_reason: str = "NONE"
+    failure_level: str | None = None
+    provider_error: str | None = None
 
 
 class SuccessEnvelope(BaseModel):
@@ -115,6 +182,7 @@ class SuccessEnvelope(BaseModel):
 class ErrorBody(BaseModel):
     code: str
     message: str
+    failure_level: str | None = None
 
 
 class ErrorEnvelope(BaseModel):

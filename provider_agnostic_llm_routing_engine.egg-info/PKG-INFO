@@ -8,6 +8,8 @@ Requires-Dist: fastapi<1.0,>=0.115
 Requires-Dist: httpx<1.0,>=0.27
 Requires-Dist: pydantic<3.0,>=2.10
 Requires-Dist: pydantic-settings<3.0,>=2.6
+Requires-Dist: plotly<7.0,>=5.24
+Requires-Dist: streamlit<2.0,>=1.40
 Requires-Dist: uvicorn[standard]<1.0,>=0.32
 
 # Provider-Agnostic LLM Routing Engine
@@ -39,12 +41,11 @@ All runtime values are external configuration: router URLs/models, request timeo
 limit, provider mapping, enabled state, and vendor-neutral capability descriptors. Copy
 `.env.example` and replace the endpoint/model values with local services.
 
-The documentation does not mandate a particular local LLM runtime protocol. The included
-HTTP router and provider adapters consequently use the common OpenAI-compatible
-chat-completions envelope. Router calls request strict JSON-schema output; provider calls
-receive only the prompt and an identity-hiding system instruction. A different local or
-vendor protocol is added by implementing the documented `BaseRouter` or `BaseProvider`
-interface, without changing the Routing Engine.
+The included Router and Provider adapters use configured OpenRouter and Groq
+chat-completions endpoints with `stream: false`. Router calls request strict JSON-schema
+output; provider calls receive only the prompt and an identity-hiding system instruction.
+All backend, model, endpoint, timeout, and credential lookup details stay in configuration,
+while the Router receives only provider IDs and abstract capability descriptors.
 
 `PROVIDERS_JSON` is a JSON array. Provider endpoint/model mapping remains private in the
 Model Registry; the Router receives only IDs and `strengths`, `speed_tier`, and
@@ -62,3 +63,19 @@ Model Registry; the Router receives only IDs and `strengths`, `speed_tier`, and
   Response Gateway filter.
 
 The implementation and acceptance criteria are defined in [docs](docs/README.md).
+
+## Evaluation dashboard
+
+Start the FastAPI service first, then run the evaluation-only Streamlit dashboard in a
+second terminal. It consumes only the versioned FastAPI endpoints and does not contact cloud
+providers directly.
+
+```bash
+uv run streamlit run dashboard/app.py
+```
+
+Use Developer Mode to reveal technical data published by the API. The frozen API does not
+publish router tier, selected provider, backend/model mapping, reasoning, capability inputs,
+or private runtime settings; the dashboard explicitly marks those fields unavailable rather
+than inferring them. Evaluation History is maintained in the browser session and can be
+exported as CSV or JSON.

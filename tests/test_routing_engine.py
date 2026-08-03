@@ -49,6 +49,23 @@ def test_primary_invalid_decision_uses_fallback_router() -> None:
     assert result.response == "fallback answer" and len(fallback.calls) == 1
 
 
+def test_developer_diagnostics_identify_the_fallback_router() -> None:
+    primary = QueueRouter([RuntimeError("timeout")])
+    fallback = QueueRouter([decision("provider_b")])
+    engine, _, _ = make_engine(primary, fallback)
+    FakeProvider.responses = {"provider_b": "fallback answer"}
+
+    result = asyncio.run(engine.handle(ChatRequest(conversation_id="c1", message="hello"), developer_mode=True))
+
+    assert result.diagnostics is not None
+    assert result.diagnostics.router_used == "fallback_router"
+    assert result.diagnostics.fallback_used is True
+    assert result.diagnostics.selected_provider == "provider_b"
+    assert result.diagnostics.failure_stage == "none"
+    assert result.diagnostics.failure_reason == "NONE"
+    assert result.diagnostics.latency_breakdown.provider_ms >= 0
+
+
 def test_complete_failure_ladder_uses_non_ai_default_router() -> None:
     primary = QueueRouter([RuntimeError("timeout")])
     fallback = QueueRouter([RuntimeError("invalid")])

@@ -27,12 +27,11 @@ All runtime values are external configuration: router URLs/models, request timeo
 limit, provider mapping, enabled state, and vendor-neutral capability descriptors. Copy
 `.env.example` and replace the endpoint/model values with local services.
 
-The documentation does not mandate a particular local LLM runtime protocol. The included
-HTTP router and provider adapters consequently use the common OpenAI-compatible
-chat-completions envelope. Router calls request strict JSON-schema output; provider calls
-receive only the prompt and an identity-hiding system instruction. A different local or
-vendor protocol is added by implementing the documented `BaseRouter` or `BaseProvider`
-interface, without changing the Routing Engine.
+The included Router and Provider adapters use configured OpenRouter and Groq
+chat-completions endpoints with `stream: false`. Router calls request strict JSON-schema
+output; provider calls receive only the prompt and an identity-hiding system instruction.
+All backend, model, endpoint, timeout, and credential lookup details stay in configuration,
+while the Router receives only provider IDs and abstract capability descriptors.
 
 `PROVIDERS_JSON` is a JSON array. Provider endpoint/model mapping remains private in the
 Model Registry; the Router receives only IDs and `strengths`, `speed_tier`, and
@@ -50,3 +49,35 @@ Model Registry; the Router receives only IDs and `strengths`, `speed_tier`, and
   Response Gateway filter.
 
 The implementation and acceptance criteria are defined in [docs](docs/README.md).
+
+## Evaluation dashboard
+
+Start the FastAPI service first, then run the evaluation-only Streamlit dashboard in a
+second terminal. It consumes only the versioned FastAPI endpoints and does not contact cloud
+providers directly.
+
+```bash
+uv run streamlit run dashboard/app.py
+```
+
+Use Developer Mode to send `X-Developer-Mode: true` with dashboard API calls. The backend then
+returns request diagnostics (router tier, selected provider, backend/model, reason,
+capabilities, retry/fallback state, request ID, timestamp, and latency breakdown) and safe
+read-only provider/router configuration metadata. API keys are never returned. Normal API
+calls omit diagnostics entirely. Evaluation History is maintained in the browser session and
+can be exported as CSV or JSON.
+
+Developer diagnostics are also returned for failed requests. They contain all safe metadata
+captured before failure plus the terminal `failure_stage` (`primary_router`, `fallback_router`,
+`dispatcher`, `provider`, `gateway`, `validator`, or `default_router`), a stable
+`failure_reason`, upstream HTTP status when available, configured provider backend/model,
+timestamps, and a safe provider-error message where applicable. The normal-user error contract
+remains unchanged.
+
+Successful Developer Mode responses report `failure_stage: "none"` and
+`failure_reason: "NONE"`; `UNKNOWN` is reserved for an unclassified failure.
+
+`provider_a` uses OpenRouter's `openai/gpt-oss-20b:free`: a zero-priced OpenRouter catalog
+model chosen to replace the intermittently billable DeepSeek-R1 mapping. It preserves the
+reasoning/coding capability descriptor without duplicating the Qwen router, Groq Llama, or
+Gemma provider models.
