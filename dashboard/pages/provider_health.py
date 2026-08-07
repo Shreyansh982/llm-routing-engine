@@ -6,7 +6,7 @@ from time import perf_counter
 
 import streamlit as st
 
-from dashboard.components.common import developer_table, status_badge
+from dashboard.components.common import developer_table
 from dashboard.utils.api_client import RoutingEngineApiClient
 from dashboard.utils.records import TECHNICAL_UNAVAILABLE
 from dashboard.utils.state import timestamp
@@ -21,10 +21,10 @@ def render(client: RoutingEngineApiClient) -> None:
     if snapshot["error"]:
         st.warning(snapshot["error"])
 
+    _render_health_metrics(snapshot)
+
     st.subheader("Routers")
     router_rows = snapshot["routers"]
-    for row in router_rows:
-        status_badge(str(row["status"]))
     developer_table(router_rows, st.session_state.developer_mode, ["id", "status"])
 
     st.subheader("Providers")
@@ -32,6 +32,21 @@ def render(client: RoutingEngineApiClient) -> None:
     developer_table(provider_rows, st.session_state.developer_mode, ["id", "enabled", "status"])
     if not st.session_state.developer_mode:
         st.caption("Enable Developer Mode to view API reachability and health-check timing.")
+
+
+def _render_health_metrics(snapshot: dict[str, object]) -> None:
+    routers = snapshot.get("routers", [])
+    providers = snapshot.get("providers", [])
+    router_rows = routers if isinstance(routers, list) else []
+    provider_rows = providers if isinstance(providers, list) else []
+    all_rows = [*router_rows, *provider_rows]
+    healthy = sum(isinstance(row, dict) and row.get("status") == "healthy" for row in all_rows)
+    reachable = sum(isinstance(row, dict) and row.get("api_reachability") is True for row in all_rows)
+    metrics = st.columns(4)
+    metrics[0].metric("Healthy components", f"{healthy}/{len(all_rows)}")
+    metrics[1].metric("API reachable", f"{reachable}/{len(all_rows)}")
+    metrics[2].metric("Routers healthy", f"{sum(isinstance(row, dict) and row.get('status') == 'healthy' for row in router_rows)}/{len(router_rows)}")
+    metrics[3].metric("Providers healthy", f"{sum(isinstance(row, dict) and row.get('status') == 'healthy' for row in provider_rows)}/{len(provider_rows)}")
 
 
 def _refresh(client: RoutingEngineApiClient) -> dict[str, object]:

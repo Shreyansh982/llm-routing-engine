@@ -5,6 +5,7 @@ from csv import DictReader
 from io import StringIO
 
 from dashboard.pages.chat import _failure_message
+from dashboard.pages.routing_details import _capability_rows
 from dashboard.utils.records import TECHNICAL_UNAVAILABLE, new_record, to_csv, to_json
 
 
@@ -115,3 +116,27 @@ def test_dashboard_failure_summary_prefers_provider_http_diagnostics() -> None:
     )
 
     assert summary == "provider failure: HTTP_429_RATE_LIMIT (upstream HTTP 429)"
+
+
+def test_routing_capabilities_are_shaped_for_a_readable_table() -> None:
+    rows = _capability_rows(
+        [
+            {
+                "id": "provider_a",
+                "capabilities": {
+                    "strengths": ["reasoning", "coding"],
+                    "speed_tier": "standard",
+                    "context_size": "large",
+                },
+            }
+        ]
+    )
+
+    assert rows == [
+        {
+            "Provider ID": "provider_a",
+            "Strengths": "reasoning, coding",
+            "Speed tier": "standard",
+            "Context size": "large",
+        }
+    ]

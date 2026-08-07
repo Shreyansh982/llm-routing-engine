@@ -27,6 +27,11 @@ All runtime values are external configuration: router URLs/models, request timeo
 limit, provider mapping, enabled state, and vendor-neutral capability descriptors. Copy
 `.env.example` and replace the endpoint/model values with local services.
 
+Router decoding is configured independently of routing decisions: `ROUTER_TEMPERATURE=0`,
+`ROUTER_MAX_TOKENS=96`, and `ROUTER_REASONING_EFFORT=none` provide deterministic,
+short structured classifications for the OpenRouter Router. The OpenRouter-only reasoning
+setting is not sent to the Groq fallback.
+
 The included Router and Provider adapters use configured OpenRouter and Groq
 chat-completions endpoints with `stream: false`. Router calls request strict JSON-schema
 output; provider calls receive only the prompt and an identity-hiding system instruction.

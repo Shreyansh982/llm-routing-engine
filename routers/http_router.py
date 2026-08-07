@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -38,40 +39,42 @@ class StructuredHTTPRouter(BaseRouter):
 
     def __init__(self, config: RouterBackendConfig) -> None:
         self._config = config
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
 
     async def decide(self, request: RouterRequest) -> RouterDecision:
         payload = self._payload(request)
-        async with httpx.AsyncClient(timeout=self._config.timeout) as client:
+        client = await self._get_client()
+        try:
+            response = await client.post(
+                self._config.endpoint, json=payload, headers=self._headers()
+            )
+            response.raise_for_status()
+            return self._parse(response.json())
+        except (httpx.HTTPError, ValueError, ValidationError):
+            # One bounded repair request is permitted by the frozen Router contract.
             try:
                 response = await client.post(
-                    self._config.endpoint, json=payload, headers=self._headers()
+                    self._config.endpoint,
+                    json=self._payload(request, repair=True),
+                    headers=self._headers(),
                 )
                 response.raise_for_status()
                 return self._parse(response.json())
-            except (httpx.HTTPError, ValueError, ValidationError):
-                # One bounded repair request is permitted by the frozen Router contract.
-                try:
-                    response = await client.post(
-                        self._config.endpoint,
-                        json=self._payload(request, repair=True),
-                        headers=self._headers(),
-                    )
-                    response.raise_for_status()
-                    return self._parse(response.json())
-                except (httpx.HTTPError, ValueError, ValidationError) as repair_error:
-                    http_status, failure_reason = self._failure_metadata(repair_error)
-                    raise RouterUnavailableError(
-                        "Router did not return a valid structured decision",
-                        http_status=http_status,
-                        failure_reason=failure_reason,
-                    ) from repair_error
+            except (httpx.HTTPError, ValueError, ValidationError) as repair_error:
+                http_status, failure_reason = self._failure_metadata(repair_error)
+                raise RouterUnavailableError(
+                    "Router did not return a valid structured decision",
+                    http_status=http_status,
+                    failure_reason=failure_reason,
+                ) from repair_error
 
     async def health(self) -> str:
         try:
-            async with httpx.AsyncClient(timeout=self._config.timeout) as client:
-                response = await client.get(self._models_endpoint(), headers=self._headers())
-                response.raise_for_status()
-                models = response.json()["data"]
+            client = await self._get_client()
+            response = await client.get(self._models_endpoint(), headers=self._headers())
+            response.raise_for_status()
+            models = response.json()["data"]
             model_ids = {
                 item["id"] for item in models if isinstance(item, dict) and isinstance(item.get("id"), str)
             }
@@ -93,13 +96,15 @@ class StructuredHTTPRouter(BaseRouter):
         )
         if repair:
             instruction += " Your previous response was invalid; return only schema-conformant JSON."
-        return {
+        payload: dict[str, Any] = {
             "model": self._config.model,
             "messages": [
                 {"role": "system", "content": instruction},
                 {"role": "user", "content": request.model_dump_json()},
             ],
             "stream": False,
+            "temperature": self._config.temperature,
+            "max_tokens": self._config.max_tokens,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -109,6 +114,19 @@ class StructuredHTTPRouter(BaseRouter):
                 },
             },
         }
+        # OpenRouter exposes Qwen3's non-thinking mode. Do not send this
+        # OpenRouter-specific parameter to the OpenAI-compatible Groq fallback.
+        if self._config.backend == "openrouter" and self._config.reasoning_effort is not None:
+            payload["reasoning"] = {"effort": self._config.reasoning_effort}
+        return payload
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Reuse a connection pool for Router calls without changing routing behavior."""
+        if self._client is None or getattr(self._client, "is_closed", False):
+            async with self._client_lock:
+                if self._client is None or getattr(self._client, "is_closed", False):
+                    self._client = httpx.AsyncClient(timeout=self._config.timeout)
+        return self._client
 
     @staticmethod
     def _parse(payload: Any) -> RouterDecision:

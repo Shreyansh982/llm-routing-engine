@@ -21,6 +21,16 @@ PAGES = {
 
 def main() -> None:
     st.set_page_config(page_title="Routing Engine Evaluation", page_icon="🧭", layout="wide")
+    st.markdown(
+        """
+        <style>
+          .block-container {padding-top: 2rem; padding-bottom: 2.5rem;}
+          [data-testid="stMetric"] {padding: 0.35rem 0;}
+          [data-testid="stExpander"] {margin-top: 0.75rem;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     initialize()
     with st.sidebar:
         st.title("Evaluation Dashboard")
@@ -29,6 +39,12 @@ def main() -> None:
         st.session_state.developer_mode = st.toggle("Developer Mode", value=st.session_state.developer_mode)
         st.session_state.evaluation_mode = st.toggle("Evaluation Mode", value=st.session_state.evaluation_mode)
         st.caption("Evaluation Mode records each API interaction in this session for export.")
+        with st.expander("Failure simulation"):
+            st.caption("The current API does not expose failure-simulation controls.")
+            st.checkbox("Fail Primary Router", disabled=True)
+            st.checkbox("Fail Fallback Router", disabled=True)
+            st.checkbox("Fail selected Provider", disabled=True)
+            st.caption("Controls remain disabled so the dashboard never fabricates backend failures.")
         conversation_ids = list(st.session_state.conversations)
         active_index = conversation_ids.index(st.session_state.active_conversation_id)
         st.session_state.active_conversation_id = st.selectbox(

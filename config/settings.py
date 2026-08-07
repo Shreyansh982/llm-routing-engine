@@ -20,6 +20,9 @@ class RouterBackendConfig(BaseModel):
     model: str = Field(min_length=1)
     api_key: SecretStr
     timeout: float = Field(gt=0)
+    temperature: float = Field(default=0.0, ge=0, le=2)
+    max_tokens: int = Field(default=96, gt=0)
+    reasoning_effort: str | None = "none"
 
 
 class Settings(BaseSettings):
@@ -42,6 +45,9 @@ class Settings(BaseSettings):
     fallback_router_model: str | None = None
     max_retries: int = Field(default=3, ge=0)
     request_timeout: float = Field(default=30, gt=0)
+    router_temperature: float = Field(default=0.0, ge=0, le=2)
+    router_max_tokens: int = Field(default=96, gt=0)
+    router_reasoning_effort: str | None = "none"
     providers_json: str = "[]"
 
     def provider_configs(self) -> list[ProviderConfig]:
@@ -80,6 +86,9 @@ class Settings(BaseSettings):
             model=model,
             api_key=self._api_key(backend),
             timeout=self.request_timeout,
+            temperature=self.router_temperature,
+            max_tokens=self.router_max_tokens,
+            reasoning_effort=self.router_reasoning_effort,
         )
 
     def _chat_endpoint(self, backend: str) -> str:
