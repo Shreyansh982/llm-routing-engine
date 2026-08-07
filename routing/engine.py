@@ -8,6 +8,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from control_plane.models import (
+    CandidateSet,
+    GovernancePolicy,
+    PolicyAuditReference,
+    PolicyDefinition,
+    PolicyKind,
+)
+from control_plane.repository import PolicyAuditRepository
+from control_plane.services import CandidateSetResolver
 from core.interfaces import BaseRouter
 from gateway.response_gateway import ResponseGateway
 from providers.adapter import ProviderUnavailableError
@@ -25,6 +34,8 @@ from schemas.models import (
     RouterRequest,
     RoutingDiagnostics,
     RoutingResponse,
+    RoutingContext,
+    TenantContext,
 )
 from state.manager import ConversationNotFoundError, ConversationStateManager
 from validation.decision_validator import DecisionValidator, InvalidDecisionError
@@ -48,6 +59,12 @@ class GatewayExecutionError(RoutingEngineError):
     code = "GATEWAY_FAILURE"
 
 
+class GovernanceDeniedError(RoutingEngineError):
+    """A V2 tenant policy left no provider eligible before Router invocation."""
+
+    code = "GOVERNANCE_POLICY_DENIED"
+
+
 @dataclass
 class _DiagnosticsCapture:
     """Request-local timing and metadata capture; it does not affect routing decisions."""
@@ -64,6 +81,9 @@ class _DiagnosticsCapture:
     provider_ms: float = 0.0
     gateway_ms: float = 0.0
     provider_error: str | None = None
+    tenant: TenantContext | None = None
+    candidate_set: CandidateSet | None = None
+    policy_audit_recorded: bool = False
 
 
 class RoutingEngine:
@@ -82,6 +102,8 @@ class RoutingEngine:
         dispatcher: ProviderDispatcher,
         gateway: ResponseGateway,
         max_attempts: int,
+        candidate_resolver: CandidateSetResolver | None = None,
+        policy_audit_repository: PolicyAuditRepository | None = None,
     ) -> None:
         self._state = state_manager
         self._registry = registry
@@ -92,23 +114,47 @@ class RoutingEngine:
         self._dispatcher = dispatcher
         self._gateway = gateway
         self._max_attempts = max_attempts
+        self._candidate_resolver = candidate_resolver
+        self._policy_audit_repository = policy_audit_repository
 
-    async def handle(self, request: ChatRequest, developer_mode: bool = False) -> RoutingResponse:
+    @property
+    def registry(self) -> ModelRegistry:
+        """Expose metadata ownership for additive control-plane composition only."""
+        return self._registry
+
+    def configure_control_plane(
+        self, resolver: CandidateSetResolver, audit_repository: PolicyAuditRepository
+    ) -> None:
+        """Attach V2.5 services without changing the V1 routing path."""
+        self._candidate_resolver = resolver
+        self._policy_audit_repository = audit_repository
+
+    async def handle(
+        self,
+        request: ChatRequest,
+        developer_mode: bool = False,
+        tenant: TenantContext | None = None,
+        routing_context: RoutingContext | None = None,
+    ) -> RoutingResponse:
         started = time.perf_counter()
-        capture = _DiagnosticsCapture() if developer_mode else None
+        # V2 policy references are auditable even when developer diagnostics are not
+        # returned. V1 still avoids all diagnostics capture unless explicitly requested.
+        capture = _DiagnosticsCapture(tenant=tenant) if developer_mode or tenant is not None else None
+        tenant_id = tenant.tenant_id if tenant is not None else "legacy"
+        routing_context = routing_context or RoutingContext()
         if request.retry:
-            state = self._state.load(request.conversation_id)
-            stopped = self._prepare_retry(state)
+            state = self._state.load(request.conversation_id, tenant_id)
+            stopped = self._prepare_retry(state, tenant_id)
             if stopped:
                 result = self._stop_response(state.conversation_id)
-                return self._attach_diagnostics(result, state, capture)
+                return self._attach_diagnostics(result, state, capture, developer_mode)
         else:
             try:
-                state = self._state.load(request.conversation_id)
+                state = self._state.load(request.conversation_id, tenant_id)
             except ConversationNotFoundError:
-                state = self._state.create(request.conversation_id, request.message, self._max_attempts)
+                state = self._state.create(request.conversation_id, request.message, self._max_attempts, tenant_id)
 
-        result = await self._route(state, request.message, capture)
+        result = await self._route(state, request.message, capture, tenant_id, routing_context)
         logger.info(
             "routing_complete conversation_id=%s action=%s attempt_count=%s latency_ms=%.2f",
             state.conversation_id,
@@ -116,11 +162,11 @@ class RoutingEngine:
             state.attempt_count,
             (time.perf_counter() - started) * 1000,
         )
-        return self._attach_diagnostics(result, state, capture)
+        return self._attach_diagnostics(result, state, capture, developer_mode)
 
-    def conversation_state(self, conversation_id: str) -> ConversationState:
+    def conversation_state(self, conversation_id: str, tenant_id: str = "legacy") -> ConversationState:
         """Expose the documented POC debugging view without leaking state ownership."""
-        return self._state.load(conversation_id)
+        return self._state.load(conversation_id, tenant_id)
 
     def provider_summaries(self) -> list[dict[str, object]]:
         """Return only provider IDs and enabled state for the public API."""
@@ -146,14 +192,14 @@ class RoutingEngine:
         if unavailable:
             raise RoutingEngineError(f"Configured Ollama models are unavailable: {', '.join(unavailable)}")
 
-    def _prepare_retry(self, state: ConversationState) -> bool:
+    def _prepare_retry(self, state: ConversationState, tenant_id: str = "legacy") -> bool:
         if self._retry_guard_fired(state):
             return True
         if state.last_provider:
-            self._state.exclude_provider(state, state.last_provider)
+            self._state.exclude_provider(state, state.last_provider, tenant_id)
         # An initial RETRY action has no prior provider to exclude. It remains bounded
         # by the same counter; this is the most consistent interpretation of the spec.
-        self._state.increment_attempt(state)
+        self._state.increment_attempt(state, tenant_id)
         return self._retry_guard_fired(state)
 
     def _retry_guard_fired(self, state: ConversationState) -> bool:
@@ -162,11 +208,28 @@ class RoutingEngine:
         )
 
     async def _route(
-        self, state: ConversationState, latest_message: str, capture: _DiagnosticsCapture | None
+        self,
+        state: ConversationState,
+        latest_message: str,
+        capture: _DiagnosticsCapture | None,
+        tenant_id: str,
+        routing_context: RoutingContext,
     ) -> RoutingResponse:
         while True:
             if self._retry_guard_fired(state):
                 return self._stop_response(state.conversation_id)
+            candidate_set = self._resolve_candidates(state.excluded_providers, capture, routing_context)
+            if not candidate_set.providers:
+                raise GovernanceDeniedError(
+                    "No provider is eligible under the active governance policy",
+                    diagnostics=self._build_diagnostics(
+                        state,
+                        capture,
+                        failure_level="governance",
+                        failure_stage=FailureStage.GOVERNANCE,
+                        failure_reason="GOVERNANCE_POLICY_DENIED",
+                    ),
+                )
             router_request = RouterRequest(
                 original_query=state.original_query,
                 latest_user_message=latest_message,
@@ -174,13 +237,19 @@ class RoutingEngine:
                 attempt=state.attempt_count,
                 max_attempts=state.max_attempts,
                 excluded_providers=state.excluded_providers,
-                available_providers=self._registry.available_for_router(state.excluded_providers),
+                available_providers=candidate_set.providers,
             )
             if capture:
                 capture.capabilities_considered = router_request.available_providers
-            decision = await self._decision_from_ladder(router_request, state.excluded_providers, state, capture)
+            decision = await self._decision_from_ladder(
+                router_request,
+                state.excluded_providers,
+                state,
+                capture,
+                [provider.id for provider in candidate_set.providers],
+            )
             if decision.action == RouterAction.RETRY:
-                if self._prepare_retry(state):
+                if self._prepare_retry(state, tenant_id):
                     return self._stop_response(state.conversation_id)
                 continue
             if decision.action == RouterAction.CLARIFY:
@@ -240,7 +309,7 @@ class RoutingEngine:
                 ) from exc
             state.previous_response = clean_response.response
             state.last_provider = decision.selected_provider
-            self._state.update(state)
+            self._state.update(state, tenant_id)
             return RoutingResponse(
                 conversation_id=state.conversation_id,
                 action=RouterAction.ANSWER,
@@ -253,6 +322,7 @@ class RoutingEngine:
         excluded_providers: list[str],
         state: ConversationState,
         capture: _DiagnosticsCapture | None,
+        allowed_provider_ids: list[str] | None = None,
     ) -> RouterDecision:
         for router_name, router, fallback_used in (
             ("primary_router", self._primary, False),
@@ -271,7 +341,7 @@ class RoutingEngine:
                 logger.warning("router_tier_failed tier=%s error=%s", type(router).__name__, type(exc).__name__)
                 continue
             try:
-                decision = self._validator.validate(raw_decision, excluded_providers)
+                decision = self._validator.validate(raw_decision, excluded_providers, allowed_provider_ids)
             except InvalidDecisionError as exc:
                 if capture:
                     capture.router_ms += (time.perf_counter() - router_started) * 1000
@@ -284,7 +354,7 @@ class RoutingEngine:
         if capture:
             capture.router_used = "deterministic_default_router"
             capture.fallback_used = True
-        default = self._default.select_default(excluded_providers)
+        default = self._default.select_default(excluded_providers, allowed_provider_ids)
         if default is None:
             raise RoutingEngineError(
                 "No eligible provider after router failure",
@@ -297,7 +367,7 @@ class RoutingEngine:
                 ),
             )
         try:
-            decision = self._validator.validate(default, excluded_providers)
+            decision = self._validator.validate(default, excluded_providers, allowed_provider_ids)
             if capture:
                 capture.routing_reason = decision.reason
             return decision
@@ -317,11 +387,63 @@ class RoutingEngine:
         return RoutingResponse(conversation_id=conversation_id, action=RouterAction.STOP, response=self.STOP_MESSAGE)
 
     def _attach_diagnostics(
-        self, response: RoutingResponse, state: ConversationState, capture: _DiagnosticsCapture | None
+        self,
+        response: RoutingResponse,
+        state: ConversationState,
+        capture: _DiagnosticsCapture | None,
+        developer_mode: bool,
     ) -> RoutingResponse:
         if capture is None:
             return response
-        return response.model_copy(update={"diagnostics": self._build_diagnostics(state, capture)})
+        diagnostics = self._build_diagnostics(state, capture)
+        if not developer_mode:
+            return response
+        return response.model_copy(update={"diagnostics": diagnostics})
+
+    def _resolve_candidates(
+        self,
+        excluded_providers: list[str],
+        capture: _DiagnosticsCapture | None,
+        routing_context: RoutingContext,
+    ) -> CandidateSet:
+        if self._candidate_resolver is None or capture is None or capture.tenant is None:
+            providers = self._registry.available_for_router(excluded_providers)
+            # V1 does not use policy/governance. The placeholder is never surfaced.
+            return CandidateSet(
+                providers=providers,
+                policy=PolicyDefinition(
+                    tenant_id="legacy", policy_id="legacy-balanced", kind=PolicyKind.LEGACY_BALANCED
+                ),
+                governance=GovernancePolicy(tenant_id="legacy"),
+            )
+        candidate_set = self._candidate_resolver.resolve(capture.tenant, routing_context, excluded_providers)
+        capture.candidate_set = candidate_set
+        self._record_policy_audit(capture)
+        return candidate_set
+
+    def _record_policy_audit(self, capture: _DiagnosticsCapture) -> None:
+        if (
+            capture.policy_audit_recorded
+            or capture.candidate_set is None
+            or capture.tenant is None
+            or self._policy_audit_repository is None
+        ):
+            return
+        candidate_set = capture.candidate_set
+        self._policy_audit_repository.append(
+            PolicyAuditReference(
+                request_id=capture.request_id,
+                tenant_id=capture.tenant.tenant_id,
+                policy_id=candidate_set.policy.policy_id,
+                policy_version=candidate_set.policy.version,
+                governance_policy_id=candidate_set.governance.policy_id,
+                governance_policy_version=candidate_set.governance.version,
+                candidate_ids=tuple(provider.id for provider in candidate_set.providers),
+                exclusions=tuple(candidate_set.exclusions),
+                rankings=tuple(candidate_set.rankings),
+            )
+        )
+        capture.policy_audit_recorded = True
 
     def _build_diagnostics(
         self,
@@ -338,6 +460,7 @@ class RoutingEngine:
         if capture.selected_provider:
             provider = self._registry.get_provider(capture.selected_provider)
             backend, model = provider.backend, provider.model
+        candidate_set = capture.candidate_set
         return RoutingDiagnostics(
             developer_mode=True,
             request_id=capture.request_id,
@@ -365,4 +488,11 @@ class RoutingEngine:
             failure_reason=failure_reason,
             failure_level=failure_level,
             provider_error=capture.provider_error,
+            tenant_id=capture.tenant.tenant_id if capture.tenant else None,
+            policy_id=candidate_set.policy.policy_id if candidate_set else None,
+            policy_version=candidate_set.policy.version if candidate_set else None,
+            governance_policy_id=candidate_set.governance.policy_id if candidate_set else None,
+            governance_policy_version=candidate_set.governance.version if candidate_set else None,
+            policy_candidate_ids=[provider.id for provider in candidate_set.providers] if candidate_set else [],
+            governance_exclusions=[item.model_dump() for item in candidate_set.exclusions] if candidate_set else [],
         )

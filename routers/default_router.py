@@ -10,9 +10,15 @@ class DeterministicDefaultRouter:
     def __init__(self, registry: ModelRegistry) -> None:
         self._registry = registry
 
-    def select_default(self, excluded_providers: list[str]) -> RouterDecision | None:
+    def select_default(
+        self, excluded_providers: list[str], allowed_provider_ids: list[str] | None = None
+    ) -> RouterDecision | None:
         for provider in self._registry.list_providers():
-            if provider.enabled and provider.id not in excluded_providers:
+            if (
+                provider.enabled
+                and provider.id not in excluded_providers
+                and (allowed_provider_ids is None or provider.id in allowed_provider_ids)
+            ):
                 return RouterDecision(
                     action=RouterAction.ANSWER,
                     selected_provider=provider.id,

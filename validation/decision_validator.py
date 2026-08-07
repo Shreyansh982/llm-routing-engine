@@ -16,7 +16,12 @@ class DecisionValidator:
     def __init__(self, registry: ModelRegistry) -> None:
         self._registry = registry
 
-    def validate(self, decision: RouterDecision | dict[str, object], excluded_providers: list[str]) -> RouterDecision:
+    def validate(
+        self,
+        decision: RouterDecision | dict[str, object],
+        excluded_providers: list[str],
+        allowed_provider_ids: list[str] | None = None,
+    ) -> RouterDecision:
         try:
             parsed = (
                 decision if isinstance(decision, RouterDecision) else RouterDecision.model_validate(decision)
@@ -33,4 +38,6 @@ class DecisionValidator:
                 raise InvalidDecisionError("Router selected a disabled provider")
             if parsed.selected_provider in excluded_providers:
                 raise InvalidDecisionError("Router selected an excluded provider")
+            if allowed_provider_ids is not None and parsed.selected_provider not in allowed_provider_ids:
+                raise InvalidDecisionError("Router selected a governance-ineligible provider")
         return parsed

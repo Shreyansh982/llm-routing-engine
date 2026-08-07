@@ -27,6 +27,7 @@ class FailureStage(StrEnum):
     GATEWAY = "gateway"
     VALIDATOR = "validator"
     DEFAULT_ROUTER = "default_router"
+    GOVERNANCE = "governance"
 
 
 def http_failure_reason(status_code: int) -> str:
@@ -59,6 +60,17 @@ class ProviderConfig(BaseModel):
     timeout: float = Field(gt=0)
     capabilities: ProviderCapability
     identity_terms: list[str] = Field(default_factory=list)
+    # Operational metadata remains private to the Registry and control plane.  The
+    # Router continues to receive only ``AvailableProvider`` capability descriptors.
+    regions: list[str] = Field(default_factory=list)
+    supported_data_classifications: list[str] = Field(
+        default_factory=lambda: ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"]
+    )
+    cost_per_1k_tokens: float = Field(default=1.0, ge=0)
+    latency_ms: float = Field(default=1000.0, gt=0)
+    quality_score: float = Field(default=0.5, ge=0, le=1)
+    health_score: float = Field(default=1.0, ge=0, le=1)
+    capacity_weight: float = Field(default=1.0, gt=0)
 
 
 class AvailableProvider(BaseModel):
@@ -128,6 +140,27 @@ class ChatRequest(BaseModel):
         return value
 
 
+class TenantContext(BaseModel):
+    """Tenant identity resolved at the API boundary for additive V2 requests."""
+
+    tenant_id: str = Field(default="default", pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+
+class RoutingContext(BaseModel):
+    """Explicit, deterministic control-plane input; it never contains provider mappings."""
+
+    policy_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    data_classification: str = Field(default="INTERNAL", min_length=1, max_length=64)
+    region: str | None = Field(default=None, min_length=1, max_length=64)
+    workload_class: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class V2ChatRequest(ChatRequest):
+    """Additive V2 chat contract.  The V1 request model remains untouched."""
+
+    routing_context: RoutingContext = Field(default_factory=RoutingContext)
+
+
 class RoutingResponse(BaseModel):
     conversation_id: str
     action: RouterAction
@@ -172,6 +205,15 @@ class RoutingDiagnostics(BaseModel):
     failure_reason: str = "NONE"
     failure_level: str | None = None
     provider_error: str | None = None
+    # V2.5 policy references are safe developer/audit metadata. They identify immutable
+    # control-plane versions, never endpoints, credentials, or concrete model mappings.
+    tenant_id: str | None = None
+    policy_id: str | None = None
+    policy_version: int | None = None
+    governance_policy_id: str | None = None
+    governance_policy_version: int | None = None
+    policy_candidate_ids: list[str] = Field(default_factory=list)
+    governance_exclusions: list[dict[str, str]] = Field(default_factory=list)
 
 
 class SuccessEnvelope(BaseModel):

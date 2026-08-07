@@ -12,12 +12,28 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from config.settings import Settings, get_settings
+from control_plane.models import (
+    GovernancePolicy,
+    PolicyDefinition,
+    V2GovernancePolicyRequest,
+    V2PolicyCreateRequest,
+    V2PolicyEvaluationRequest,
+)
+from control_plane.repository import GovernanceRepository, PolicyAuditRepository, PolicyRepository
+from control_plane.services import CandidateSetResolver, GovernanceEvaluator, PolicyEvaluator, PolicyNotFoundError
+from control_plane.tenant import TenantContextResolver
 from gateway.response_gateway import ResponseGateway
 from providers.dispatcher import ProviderDispatcher
 from registry.model_registry import ModelRegistry
 from routers.default_router import DeterministicDefaultRouter
 from routers.http_router import FallbackRouter, PrimaryRouter
-from routing.engine import GatewayExecutionError, ProviderExecutionError, RoutingEngine, RoutingEngineError
+from routing.engine import (
+    GatewayExecutionError,
+    GovernanceDeniedError,
+    ProviderExecutionError,
+    RoutingEngine,
+    RoutingEngineError,
+)
 from schemas.models import (
     ChatRequest,
     ErrorEnvelope,
@@ -26,6 +42,7 @@ from schemas.models import (
     RoutingDiagnostics,
     RoutingResponse,
     SuccessEnvelope,
+    V2ChatRequest,
 )
 from state.manager import ConversationNotFoundError, ConversationStateManager
 from validation.decision_validator import DecisionValidator
@@ -153,6 +170,16 @@ def create_app(engine: RoutingEngine | None = None, settings: Settings | None = 
     configure_logging()
     runtime_settings = settings or get_settings()
     routing_engine = engine or build_engine(runtime_settings)
+    policy_repository = PolicyRepository()
+    governance_repository = GovernanceRepository()
+    policy_audit_repository = PolicyAuditRepository()
+    candidate_resolver = CandidateSetResolver(
+        routing_engine.registry,
+        GovernanceEvaluator(governance_repository),
+        PolicyEvaluator(policy_repository),
+    )
+    routing_engine.configure_control_plane(candidate_resolver, policy_audit_repository)
+    tenant_resolver = TenantContextResolver()
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await routing_engine.verify_startup()
@@ -162,6 +189,11 @@ def create_app(engine: RoutingEngine | None = None, settings: Settings | None = 
         title="Provider-Agnostic LLM Routing Engine", version="0.1.0", lifespan=lifespan
     )
     app.state.engine = routing_engine
+    app.state.policy_repository = policy_repository
+    app.state.governance_repository = governance_repository
+    app.state.policy_audit_repository = policy_audit_repository
+    app.state.candidate_resolver = candidate_resolver
+    app.state.tenant_resolver = tenant_resolver
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_handler(request: Request, _: RequestValidationError) -> JSONResponse:
@@ -181,6 +213,21 @@ def create_app(engine: RoutingEngine | None = None, settings: Settings | None = 
             "provider",
             _provider_failure_diagnostics(exc.diagnostics),
         )
+
+    @app.exception_handler(GovernanceDeniedError)
+    async def governance_handler(request: Request, exc: GovernanceDeniedError) -> JSONResponse:
+        return _error_response(
+            request,
+            403,
+            "GOVERNANCE_POLICY_DENIED",
+            "No provider is eligible under the active governance policy.",
+            "governance",
+            exc.diagnostics,
+        )
+
+    @app.exception_handler(PolicyNotFoundError)
+    async def policy_not_found_handler(request: Request, _: PolicyNotFoundError) -> JSONResponse:
+        return _error_response(request, 404, "POLICY_NOT_FOUND", "Policy not found.", "policy")
 
     @app.exception_handler(RoutingEngineError)
     async def routing_handler(request: Request, exc: RoutingEngineError) -> JSONResponse:
@@ -243,6 +290,96 @@ def create_app(engine: RoutingEngine | None = None, settings: Settings | None = 
     @app.get("/api/v1/providers/health")
     async def providers_health() -> dict[str, object]:
         return _success(await app.state.engine.provider_health())
+
+    @app.post("/api/v2/chat")
+    async def chat_v2(http_request: Request, request: V2ChatRequest) -> dict[str, object]:
+        tenant = app.state.tenant_resolver.resolve(http_request)
+        result: RoutingResponse = await app.state.engine.handle(
+            request,
+            developer_mode=_developer_mode(http_request),
+            tenant=tenant,
+            routing_context=request.routing_context,
+        )
+        data = result.model_dump(mode="json", exclude_none=True)
+        if _developer_mode(http_request) and isinstance(data.get("diagnostics"), dict):
+            data["diagnostics"]["http_status"] = 200
+        return _success(data)
+
+    @app.get("/api/v2/policies")
+    async def list_policies(http_request: Request) -> dict[str, object]:
+        tenant = app.state.tenant_resolver.resolve(http_request)
+        policies = app.state.policy_repository.list(tenant.tenant_id)
+        if not policies:
+            policies = [app.state.policy_repository.get_active(tenant.tenant_id)]
+        return _success({"tenant_id": tenant.tenant_id, "policies": [policy.model_dump(mode="json") for policy in policies]})
+
+    @app.post("/api/v2/policies")
+    async def create_policy(http_request: Request, request: V2PolicyCreateRequest) -> dict[str, object]:
+        tenant = app.state.tenant_resolver.resolve(http_request)
+        policy = app.state.policy_repository.create(
+            PolicyDefinition(
+                tenant_id=tenant.tenant_id,
+                policy_id=request.policy_id,
+                kind=request.kind,
+                description=request.description,
+            ),
+            activate=request.activate,
+        )
+        return _success({"policy": policy.model_dump(mode="json")})
+
+    @app.post("/api/v2/policies/{policy_id}/activate")
+    async def activate_policy(http_request: Request, policy_id: str) -> dict[str, object]:
+        tenant = app.state.tenant_resolver.resolve(http_request)
+        try:
+            policy = app.state.policy_repository.activate(tenant.tenant_id, policy_id)
+        except KeyError as exc:
+            raise PolicyNotFoundError(policy_id) from exc
+        return _success({"policy": policy.model_dump(mode="json")})
+
+    @app.post("/api/v2/policies/evaluate")
+    async def evaluate_policy(http_request: Request, request: V2PolicyEvaluationRequest) -> dict[str, object]:
+        tenant = app.state.tenant_resolver.resolve(http_request)
+        candidate_set = app.state.candidate_resolver.resolve(
+            tenant, request.routing_context, request.excluded_provider_ids
+        )
+        return _success(
+            {
+                "tenant_id": tenant.tenant_id,
+                "policy": candidate_set.policy.model_dump(mode="json"),
+                "governance": candidate_set.governance.model_dump(mode="json"),
+                "candidates": [provider.model_dump(mode="json") for provider in candidate_set.providers],
+                "rankings": [ranking.model_dump(mode="json") for ranking in candidate_set.rankings],
+                "exclusions": [exclusion.model_dump(mode="json") for exclusion in candidate_set.exclusions],
+            }
+        )
+
+    @app.get("/api/v2/governance/policy")
+    async def get_governance_policy(http_request: Request) -> dict[str, object]:
+        tenant = app.state.tenant_resolver.resolve(http_request)
+        return _success({"policy": app.state.governance_repository.get_active(tenant.tenant_id).model_dump(mode="json")})
+
+    @app.put("/api/v2/governance/policy")
+    async def update_governance_policy(
+        http_request: Request, request: V2GovernancePolicyRequest
+    ) -> dict[str, object]:
+        tenant = app.state.tenant_resolver.resolve(http_request)
+        policy = app.state.governance_repository.upsert(
+            GovernancePolicy(
+                tenant_id=tenant.tenant_id,
+                policy_id=request.policy_id,
+                allowed_provider_ids=request.allowed_provider_ids,
+                denied_provider_ids=request.denied_provider_ids,
+                allowed_regions=request.allowed_regions,
+                active=request.activate,
+            )
+        )
+        return _success({"policy": policy.model_dump(mode="json")})
+
+    @app.get("/api/v2/audit/policy-references")
+    async def list_policy_audit_references(http_request: Request) -> dict[str, object]:
+        tenant = app.state.tenant_resolver.resolve(http_request)
+        records = app.state.policy_audit_repository.list(tenant.tenant_id)
+        return _success({"tenant_id": tenant.tenant_id, "references": [record.model_dump(mode="json") for record in records]})
 
     return app
 
