@@ -48,6 +48,8 @@ def test_developer_header_returns_diagnostics_without_secrets() -> None:
     assert diagnostics["request_timestamp"] == diagnostics["timestamp"]
     assert diagnostics["capabilities_considered"]
     assert diagnostics["latency_breakdown"]["total_ms"] >= 0
+    assert "policy_candidate_ids" not in diagnostics
+    assert "governance_exclusions" not in diagnostics
     assert "api_key" not in str(diagnostics).lower()
 
 

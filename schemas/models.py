@@ -212,8 +212,8 @@ class RoutingDiagnostics(BaseModel):
     policy_version: int | None = None
     governance_policy_id: str | None = None
     governance_policy_version: int | None = None
-    policy_candidate_ids: list[str] = Field(default_factory=list)
-    governance_exclusions: list[dict[str, str]] = Field(default_factory=list)
+    policy_candidate_ids: list[str] | None = None
+    governance_exclusions: list[dict[str, str]] | None = None
 
 
 class SuccessEnvelope(BaseModel):

@@ -493,6 +493,6 @@ class RoutingEngine:
             policy_version=candidate_set.policy.version if candidate_set else None,
             governance_policy_id=candidate_set.governance.policy_id if candidate_set else None,
             governance_policy_version=candidate_set.governance.version if candidate_set else None,
-            policy_candidate_ids=[provider.id for provider in candidate_set.providers] if candidate_set else [],
-            governance_exclusions=[item.model_dump() for item in candidate_set.exclusions] if candidate_set else [],
+            policy_candidate_ids=[provider.id for provider in candidate_set.providers] if candidate_set else None,
+            governance_exclusions=[item.model_dump() for item in candidate_set.exclusions] if candidate_set else None,
         )
