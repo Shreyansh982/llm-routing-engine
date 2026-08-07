@@ -42,6 +42,24 @@ while the Router receives only provider IDs and abstract capability descriptors.
 Model Registry; the Router receives only IDs and `strengths`, `speed_tier`, and
 `context_size` capability descriptors.
 
+## V2.5 governed policy foundation
+
+The additive `/api/v2` control-plane endpoints provide tenant-scoped deterministic candidate
+ordering and governance filtering. Set `X-Tenant-ID` on V2 requests; omitting it selects the
+isolated `default` tenant. V1 endpoints keep their existing behavior and use the
+`legacy-balanced` ordering implicitly.
+
+Built-in policies are `legacy-balanced`, `balanced`, `cheapest`, `lowest_latency`,
+`highest_quality`, and `compliance`. They only filter/order Registry candidates; the Router
+still makes the final AI decision and sees only provider IDs plus abstract capabilities.
+
+Optional private Registry metadata in `PROVIDERS_JSON` supports these policies:
+`regions`, `supported_data_classifications`, `cost_per_1k_tokens`, `latency_ms`,
+`quality_score`, `health_score`, and `capacity_weight`. None is sent to the Router.
+
+The minimal Streamlit Policy Studio administers and evaluates V2 policies through FastAPI
+only. Start the dashboard as usual and open **Policy Studio**.
+
 ## Behaviour
 
 - A client retry is explicit: `POST /api/v1/chat` with `retry: true` excludes the prior

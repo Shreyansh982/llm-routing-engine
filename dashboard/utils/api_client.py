@@ -53,17 +53,38 @@ class RoutingEngineApiClient:
     def provider_health(self) -> ApiResult:
         return self._request("GET", "/providers/health")
 
+    def policies(self, tenant_id: str) -> ApiResult:
+        return self._request("GET", "/policies", api_version="v2", tenant_id=tenant_id)
+
+    def create_policy(self, tenant_id: str, body: dict[str, Any]) -> ApiResult:
+        return self._request("POST", "/policies", body, api_version="v2", tenant_id=tenant_id)
+
+    def activate_policy(self, tenant_id: str, policy_id: str) -> ApiResult:
+        return self._request("POST", f"/policies/{policy_id}/activate", api_version="v2", tenant_id=tenant_id)
+
+    def evaluate_policy(self, tenant_id: str, body: dict[str, Any]) -> ApiResult:
+        return self._request("POST", "/policies/evaluate", body, api_version="v2", tenant_id=tenant_id)
+
     def _request(
-        self, method: str, path: str, body: dict[str, Any] | None = None, developer_mode: bool = False
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        developer_mode: bool = False,
+        api_version: str = "v1",
+        tenant_id: str | None = None,
     ) -> ApiResult:
         started = perf_counter()
         try:
+            headers = {"X-Developer-Mode": "true"} if developer_mode else {}
+            if tenant_id:
+                headers["X-Tenant-ID"] = tenant_id
             with httpx.Client(timeout=self._timeout) as client:
                 response = client.request(
                     method,
-                    f"{self._base_url}{path}",
+                    f"{self._api_base(api_version)}{path}",
                     json=body,
-                    headers={"X-Developer-Mode": "true"} if developer_mode else {},
+                    headers=headers,
                 )
             payload = response.json()
             if not isinstance(payload, dict):
@@ -72,6 +93,12 @@ class RoutingEngineApiClient:
             return ApiResult(response.status_code, (perf_counter() - started) * 1000, payload, error)
         except (httpx.HTTPError, ValueError) as exc:
             return ApiResult(0, (perf_counter() - started) * 1000, {}, "Unable to reach the Routing Engine API.")
+
+    def _api_base(self, api_version: str) -> str:
+        suffix = "/api/v1"
+        if self._base_url.endswith(suffix):
+            return f"{self._base_url[:-len(suffix)]}/api/{api_version}"
+        return self._base_url if api_version == "v1" else f"{self._base_url}/api/{api_version}"
 
     @staticmethod
     def _error_message(payload: dict[str, Any], fallback: str) -> str:

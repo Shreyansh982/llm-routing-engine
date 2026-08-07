@@ -15,6 +15,7 @@ def new_conversation_id() -> str:
 def initialize() -> None:
     defaults = {
         "api_base_url": "http://127.0.0.1:8000/api/v1",
+        "tenant_id": "default",
         "developer_mode": False,
         "evaluation_mode": True,
         "active_conversation_id": new_conversation_id(),

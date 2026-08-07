@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from dashboard.pages import analytics, chat, evaluation_history, provider_health, routing_details, settings
+from dashboard.pages import analytics, chat, evaluation_history, policy_studio, provider_health, routing_details, settings
 from dashboard.utils.api_client import RoutingEngineApiClient
 from dashboard.utils.state import initialize
 
@@ -16,6 +16,7 @@ PAGES = {
     "Provider Health": provider_health.render,
     "Evaluation History": evaluation_history.render,
     "Settings": settings.render,
+    "Policy Studio": policy_studio.render,
 }
 
 
@@ -61,7 +62,7 @@ def main() -> None:
 
     client = RoutingEngineApiClient(st.session_state.api_base_url)
     render = PAGES[page]
-    if page in {"Chat", "Provider Health", "Settings"}:
+    if page in {"Chat", "Provider Health", "Settings", "Policy Studio"}:
         render(client)
     else:
         render()
