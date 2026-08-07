@@ -4,6 +4,11 @@ api/__init__.py
 api/main.py
 config/__init__.py
 config/settings.py
+control_plane/__init__.py
+control_plane/models.py
+control_plane/repository.py
+control_plane/services.py
+control_plane/tenant.py
 core/__init__.py
 core/interfaces.py
 dashboard/__init__.py
@@ -14,6 +19,7 @@ dashboard/pages/__init__.py
 dashboard/pages/analytics.py
 dashboard/pages/chat.py
 dashboard/pages/evaluation_history.py
+dashboard/pages/policy_studio.py
 dashboard/pages/provider_health.py
 dashboard/pages/routing_details.py
 dashboard/pages/settings.py
@@ -45,6 +51,7 @@ state/manager.py
 tests/test_api.py
 tests/test_cloud_integration.py
 tests/test_cloud_router.py
+tests/test_control_plane.py
 tests/test_dashboard_records.py
 tests/test_gateway_and_adapters.py
 tests/test_routing_engine.py

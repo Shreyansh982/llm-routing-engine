@@ -41,6 +41,11 @@ All runtime values are external configuration: router URLs/models, request timeo
 limit, provider mapping, enabled state, and vendor-neutral capability descriptors. Copy
 `.env.example` and replace the endpoint/model values with local services.
 
+Router decoding is configured independently of routing decisions: `ROUTER_TEMPERATURE=0`,
+`ROUTER_MAX_TOKENS=96`, and `ROUTER_REASONING_EFFORT=none` provide deterministic,
+short structured classifications for the OpenRouter Router. The OpenRouter-only reasoning
+setting is not sent to the Groq fallback.
+
 The included Router and Provider adapters use configured OpenRouter and Groq
 chat-completions endpoints with `stream: false`. Router calls request strict JSON-schema
 output; provider calls receive only the prompt and an identity-hiding system instruction.
@@ -50,6 +55,24 @@ while the Router receives only provider IDs and abstract capability descriptors.
 `PROVIDERS_JSON` is a JSON array. Provider endpoint/model mapping remains private in the
 Model Registry; the Router receives only IDs and `strengths`, `speed_tier`, and
 `context_size` capability descriptors.
+
+## V2.5 governed policy foundation
+
+The additive `/api/v2` control-plane endpoints provide tenant-scoped deterministic candidate
+ordering and governance filtering. Set `X-Tenant-ID` on V2 requests; omitting it selects the
+isolated `default` tenant. V1 endpoints keep their existing behavior and use the
+`legacy-balanced` ordering implicitly.
+
+Built-in policies are `legacy-balanced`, `balanced`, `cheapest`, `lowest_latency`,
+`highest_quality`, and `compliance`. They only filter/order Registry candidates; the Router
+still makes the final AI decision and sees only provider IDs plus abstract capabilities.
+
+Optional private Registry metadata in `PROVIDERS_JSON` supports these policies:
+`regions`, `supported_data_classifications`, `cost_per_1k_tokens`, `latency_ms`,
+`quality_score`, `health_score`, and `capacity_weight`. None is sent to the Router.
+
+The minimal Streamlit Policy Studio administers and evaluates V2 policies through FastAPI
+only. Start the dashboard as usual and open **Policy Studio**.
 
 ## Behaviour
 
@@ -74,8 +97,24 @@ providers directly.
 uv run streamlit run dashboard/app.py
 ```
 
-Use Developer Mode to reveal technical data published by the API. The frozen API does not
-publish router tier, selected provider, backend/model mapping, reasoning, capability inputs,
-or private runtime settings; the dashboard explicitly marks those fields unavailable rather
-than inferring them. Evaluation History is maintained in the browser session and can be
-exported as CSV or JSON.
+Use Developer Mode to send `X-Developer-Mode: true` with dashboard API calls. The backend then
+returns request diagnostics (router tier, selected provider, backend/model, reason,
+capabilities, retry/fallback state, request ID, timestamp, and latency breakdown) and safe
+read-only provider/router configuration metadata. API keys are never returned. Normal API
+calls omit diagnostics entirely. Evaluation History is maintained in the browser session and
+can be exported as CSV or JSON.
+
+Developer diagnostics are also returned for failed requests. They contain all safe metadata
+captured before failure plus the terminal `failure_stage` (`primary_router`, `fallback_router`,
+`dispatcher`, `provider`, `gateway`, `validator`, or `default_router`), a stable
+`failure_reason`, upstream HTTP status when available, configured provider backend/model,
+timestamps, and a safe provider-error message where applicable. The normal-user error contract
+remains unchanged.
+
+Successful Developer Mode responses report `failure_stage: "none"` and
+`failure_reason: "NONE"`; `UNKNOWN` is reserved for an unclassified failure.
+
+`provider_a` uses OpenRouter's `openai/gpt-oss-20b:free`: a zero-priced OpenRouter catalog
+model chosen to replace the intermittently billable DeepSeek-R1 mapping. It preserves the
+reasoning/coding capability descriptor without duplicating the Qwen router, Groq Llama, or
+Gemma provider models.
