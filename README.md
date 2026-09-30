@@ -1,9 +1,30 @@
 # Provider-Agnostic LLM Routing Engine
 
 This repository implements the documented provider-agnostic LLM Routing Engine POC. It is a
-FastAPI middleware that lets a local Router LLM choose among abstract provider IDs using
+FastAPI middleware that lets a configured Router LLM choose among abstract provider IDs using
 configuration-defined capability descriptors. The engine owns retry bookkeeping and the
 finite failure ladder; it never contains provider-selection intelligence.
+
+## Project Snapshot
+
+Static, code-verified snapshot; this is not a runtime evaluation.
+
+| Area | Verified value | Source |
+| --- | --- | --- |
+| Configuration | 3 enabled provider entries | [`.env.example`](.env.example) `PROVIDERS_JSON` |
+| Configuration | 3 router tiers: Primary, Fallback, Deterministic Default | [`api/main.py`](api/main.py), [`routers/`](routers) |
+| Configuration | `MAX_RETRIES`: 3 | [`.env.example`](.env.example) |
+| Configuration | Router temperature: 0 | [`.env.example`](.env.example) |
+| Configuration | Router token budget: 96 maximum output tokens | [`.env.example`](.env.example) |
+| Configuration | Primary Router: `qwen/qwen3-8b`; Fallback Router: `llama-3.3-70b-versatile` | [`.env.example`](.env.example) |
+| API | 14 versioned endpoint routes: 6 under V1 and 8 under V2 | [`api/main.py`](api/main.py) |
+| Tests | 37 automated test functions across 9 test modules | [`tests/`](tests) |
+| Deterministic evaluation test | 15 labeled routing cases; acceptance threshold: >=80% capability match | [`tests/test_routing_evaluation.py`](tests/test_routing_evaluation.py), [`docs/Testing_Strategy.md`](docs/Testing_Strategy.md) |
+
+The routing-evaluation test uses `CapabilityEvaluationRouter`, a deterministic test double.
+Its >=80% capability-match assertion is a test acceptance threshold, **not** routing accuracy
+for either real Router LLM. The repository contains no persisted runtime measurements for real
+LLM routing accuracy, latency (including p95), fallback rate, or throughput.
 
 ## Quick start
 
@@ -28,8 +49,8 @@ limit, provider mapping, enabled state, and vendor-neutral capability descriptor
 `.env.example` and replace the endpoint/model values with local services.
 
 Router decoding is configured independently of routing decisions: `ROUTER_TEMPERATURE=0`,
-`ROUTER_MAX_TOKENS=96`, and `ROUTER_REASONING_EFFORT=none` provide deterministic,
-short structured classifications for the OpenRouter Router. The OpenRouter-only reasoning
+`ROUTER_MAX_TOKENS=96`, and `ROUTER_REASONING_EFFORT=none` configure short structured
+classifications for the OpenRouter Router. The OpenRouter-only reasoning
 setting is not sent to the Groq fallback.
 
 The included Router and Provider adapters use configured OpenRouter and Groq
