@@ -12,109 +12,80 @@ Requires-Dist: plotly<7.0,>=5.24
 Requires-Dist: streamlit<2.0,>=1.40
 Requires-Dist: uvicorn[standard]<1.0,>=0.32
 
-# Provider-Agnostic LLM Routing Engine
+# Provider-agnostic LLM routing engine
 
-This repository implements the documented provider-agnostic LLM Routing Engine POC. It is a
-FastAPI middleware that lets a local Router LLM choose among abstract provider IDs using
-configuration-defined capability descriptors. The engine owns retry bookkeeping and the
-finite failure ladder; it never contains provider-selection intelligence.
+This proof of concept exposes a FastAPI chat API that classifies each request into one of four task groups and executes a configuration-driven provider fallback chain. Routers classify; they never select concrete models.
+
+## Current topology
+
+- Routers: Google `gemini-3.8-flash` → NVIDIA `z-ai/glm-5-3-flash`
+- General: G1 Google → G2 OpenRouter → G3 Groq → G4 NVIDIA
+- Coding/reasoning: C1 Groq → C2 NVIDIA → C3 OpenRouter → C4 OpenRouter
+- Creative: W1 OpenRouter → W2 Google
+- Multimodal: M1 NVIDIA → M2 OpenRouter
+
+The exact 12 task-model IDs and metadata are in `.env.example`. The selected free tiers/endpoints are suitable for evaluation, not guaranteed production capacity; provider quotas and catalogs can change.
+
+## Request flow
+
+```text
+FastAPI request
+→ optional V2 governance eligibility/ranking
+→ Google task-group classifier
+→ NVIDIA classifier on failure
+→ registry candidates for the selected group
+→ backend circuit check and one attempt per candidate
+→ response gateway
+→ response and optional developer diagnostics
+```
+
+The task groups are exactly `general`, `coding_reasoning`, `creative`, and `multimodal`. The deterministic legacy default router no longer exists.
 
 ## Quick start
 
 ```bash
-cp .env.example .env
+copy .env.example .env
 uv sync
 uv run uvicorn api.main:app --reload
 ```
 
-The API is versioned under `/api/v1`. Its POC endpoints are `POST /chat`, `GET
-/conversation/{id}`, `GET /providers`, `GET /health`, `GET /router/health`, and `GET
-/providers/health`.
+Populate all four provider keys in the private `.env`. `OPENROOUTER_API_KEY` remains a deprecated compatibility alias for the correctly spelled OpenRouter key. `MAX_RETRIES` means maximum explicit conversation-level retries; provider adapters do not retry task calls.
+
+Run tests:
 
 ```bash
-uv run pytest
+uv run pytest -q
 ```
 
-## Configuration
+Unit/integration tests use fakes and do not consume cloud quota. The cloud test remains opt-in through `RUN_CLOUD_INTEGRATION=1` and valid credentials.
 
-All runtime values are external configuration: router URLs/models, request timeout, retry
-limit, provider mapping, enabled state, and vendor-neutral capability descriptors. Copy
-`.env.example` and replace the endpoint/model values with local services.
+## Text and image input
 
-Router decoding is configured independently of routing decisions: `ROUTER_TEMPERATURE=0`,
-`ROUTER_MAX_TOKENS=96`, and `ROUTER_REASONING_EFFORT=none` provide deterministic,
-short structured classifications for the OpenRouter Router. The OpenRouter-only reasoning
-setting is not sent to the Groq fallback.
+Text-only V1/V2 requests remain unchanged. An optional single JPEG, PNG, or WebP image may be supplied as validated base64:
 
-The included Router and Provider adapters use configured OpenRouter and Groq
-chat-completions endpoints with `stream: false`. Router calls request strict JSON-schema
-output; provider calls receive only the prompt and an identity-hiding system instruction.
-All backend, model, endpoint, timeout, and credential lookup details stay in configuration,
-while the Router receives only provider IDs and abstract capability descriptors.
+```json
+{
+  "conversation_id": "example",
+  "message": "Describe this image",
+  "image": {
+    "media_type": "image/png",
+    "data_base64": "..."
+  }
+}
+```
 
-`PROVIDERS_JSON` is a JSON array. Provider endpoint/model mapping remains private in the
-Model Registry; the Router receives only IDs and `strengths`, `speed_tier`, and
-`context_size` capability descriptors.
+Image URLs, audio, video, and image generation are out of scope. Image data is forwarded only at the provider transport boundary and is not retained in conversation state, diagnostics, dashboard history, or exports.
 
-## V2.5 governed policy foundation
+## Resilience and observability
 
-The additive `/api/v2` control-plane endpoints provide tenant-scoped deterministic candidate
-ordering and governance filtering. Set `X-Tenant-ID` on V2 requests; omitting it selects the
-isolated `default` tenant. V1 endpoints keep their existing behavior and use the
-`legacy-balanced` ordering implicitly.
+Google, NVIDIA, OpenRouter, and Groq each have one process-local circuit shared by router and task-model calls. Three qualifying backend-transient failures open a circuit for 30 seconds; one half-open probe determines recovery. Health polling only reads circuit snapshots and never changes state. Circuit state resets when the process restarts.
 
-Built-in policies are `legacy-balanced`, `balanced`, `cheapest`, `lowest_latency`,
-`highest_quality`, and `compliance`. They only filter/order Registry candidates; the Router
-still makes the final AI decision and sees only provider IDs plus abstract capabilities.
+Set `X-Developer-Mode: true` to receive safe task-group, router-attempt, provider-fallback, latency, error-classification, and circuit diagnostics. Normal chat responses do not expose routing internals. Credentials, endpoints, upstream bodies, and image data are never included.
 
-Optional private Registry metadata in `PROVIDERS_JSON` supports these policies:
-`regions`, `supported_data_classifications`, `cost_per_1k_tokens`, `latency_ms`,
-`quality_score`, `health_score`, and `capacity_weight`. None is sent to the Router.
-
-The minimal Streamlit Policy Studio administers and evaluates V2 policies through FastAPI
-only. Start the dashboard as usual and open **Policy Studio**.
-
-## Behaviour
-
-- A client retry is explicit: `POST /api/v1/chat` with `retry: true` excludes the prior
-  provider and increments the attempt count.
-- Retry stops before another Router call once the configured maximum is reached or the
-  enabled provider pool is exhausted.
-- Primary Router failures demote to Fallback Router, then the non-AI deterministic default
-  router, then a controlled 503.
-- Provider replies are guarded by an adapter identity-hiding prompt and a best-effort
-  Response Gateway filter.
-
-The implementation and acceptance criteria are defined in [docs](docs/README.md).
-
-## Evaluation dashboard
-
-Start the FastAPI service first, then run the evaluation-only Streamlit dashboard in a
-second terminal. It consumes only the versioned FastAPI endpoints and does not contact cloud
-providers directly.
+The Streamlit/Plotly evaluation dashboard remains an API-only client:
 
 ```bash
 uv run streamlit run dashboard/app.py
 ```
 
-Use Developer Mode to send `X-Developer-Mode: true` with dashboard API calls. The backend then
-returns request diagnostics (router tier, selected provider, backend/model, reason,
-capabilities, retry/fallback state, request ID, timestamp, and latency breakdown) and safe
-read-only provider/router configuration metadata. API keys are never returned. Normal API
-calls omit diagnostics entirely. Evaluation History is maintained in the browser session and
-can be exported as CSV or JSON.
-
-Developer diagnostics are also returned for failed requests. They contain all safe metadata
-captured before failure plus the terminal `failure_stage` (`primary_router`, `fallback_router`,
-`dispatcher`, `provider`, `gateway`, `validator`, or `default_router`), a stable
-`failure_reason`, upstream HTTP status when available, configured provider backend/model,
-timestamps, and a safe provider-error message where applicable. The normal-user error contract
-remains unchanged.
-
-Successful Developer Mode responses report `failure_stage: "none"` and
-`failure_reason: "NONE"`; `UNKNOWN` is reserved for an unclassified failure.
-
-`provider_a` uses OpenRouter's `openai/gpt-oss-20b:free`: a zero-priced OpenRouter catalog
-model chosen to replace the intermittently billable DeepSeek-R1 mapping. It preserves the
-reasoning/coding capability descriptor without duplicating the Qwen router, Groq Llama, or
-Gemma provider models.
+See [`docs/README.md`](docs/README.md) for architecture, contracts, testing, and limitations.

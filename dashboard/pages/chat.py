@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import base64
+
 import streamlit as st
 
 from dashboard.components.common import status_badge
 from dashboard.utils.api_client import RoutingEngineApiClient
 from dashboard.utils.records import new_record
-from dashboard.utils.state import append_message, clear_active_conversation, start_new_conversation, timestamp
+from dashboard.utils.state import (
+    append_message,
+    clear_active_conversation,
+    start_new_conversation,
+    timestamp,
+)
 
 
 def render(client: RoutingEngineApiClient) -> None:
@@ -16,37 +23,66 @@ def render(client: RoutingEngineApiClient) -> None:
     conversation_id = st.session_state.active_conversation_id
 
     actions = st.columns(3)
-    if actions[0].button("New conversation", use_container_width=True):
+    if actions[0].button("New conversation", width="stretch"):
         start_new_conversation()
         st.rerun()
-    if actions[1].button("Clear conversation", use_container_width=True):
+    if actions[1].button("Clear conversation", width="stretch"):
         clear_active_conversation()
         st.rerun()
-    if actions[2].button("Retry last request", use_container_width=True, disabled=not st.session_state.last_request):
-        _send(client, st.session_state.last_request["prompt"], retry=True)
+    previous_had_image = bool(
+        st.session_state.last_request and st.session_state.last_request.get("has_image")
+    )
+    if actions[2].button(
+        "Retry last request",
+        width="stretch",
+        disabled=not st.session_state.last_request or previous_had_image,
+    ):
+        _send(client, st.session_state.last_request["prompt"], retry=True, image=None)
         st.rerun()
+    if previous_had_image:
+        st.caption("Image requests must be resubmitted with the image attached; raw files are not stored.")
 
     for message in st.session_state.conversations.get(conversation_id, []):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
     with st.form("chat-form", clear_on_submit=True):
-        prompt = st.text_area("Message", placeholder="Enter a prompt to evaluate…", height=120)
-        sent = st.form_submit_button("Send", use_container_width=True)
+        prompt = st.text_area("Message", placeholder="Enter a prompt to evaluate...", height=120)
+        uploaded = st.file_uploader(
+            "Image (optional)",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=False,
+        )
+        sent = st.form_submit_button("Send", width="stretch")
     if sent:
         if not prompt.strip():
             st.warning("Enter a message before sending.")
         else:
-            _send(client, prompt.strip(), retry=False)
+            image = None
+            if uploaded is not None:
+                image = {
+                    "media_type": uploaded.type,
+                    "data_base64": base64.b64encode(uploaded.getvalue()).decode("ascii"),
+                }
+            _send(client, prompt.strip(), retry=False, image=image)
             st.rerun()
 
 
-def _send(client: RoutingEngineApiClient, prompt: str, retry: bool) -> None:
+def _send(
+    client: RoutingEngineApiClient,
+    prompt: str,
+    retry: bool,
+    image: dict[str, str] | None,
+) -> None:
     conversation_id = st.session_state.active_conversation_id
     append_message(conversation_id, "user", prompt)
-    with st.spinner("Routing request…"):
+    with st.spinner("Routing request..."):
         result = client.chat(
-            conversation_id, prompt, retry=retry, developer_mode=st.session_state.developer_mode
+            conversation_id,
+            prompt,
+            retry=retry,
+            developer_mode=st.session_state.developer_mode,
+            image=image,
         )
         conversation = client.conversation(conversation_id) if result.succeeded else None
 
@@ -55,8 +91,10 @@ def _send(client: RoutingEngineApiClient, prompt: str, retry: bool) -> None:
     action = data.get("action") if isinstance(data, dict) else None
     diagnostics = data.get("diagnostics") if isinstance(data, dict) else result.payload.get("diagnostics")
     if not isinstance(response, str):
-        response = _failure_message(diagnostics) if isinstance(diagnostics, dict) else (
-            result.error or "The Routing Engine could not process this request."
+        response = (
+            _failure_message(diagnostics)
+            if isinstance(diagnostics, dict)
+            else result.error or "The Routing Engine could not process this request."
         )
     append_message(conversation_id, "assistant", response)
 
@@ -65,13 +103,12 @@ def _send(client: RoutingEngineApiClient, prompt: str, retry: bool) -> None:
         state = conversation.payload.get("data", {})
         if isinstance(state, dict) and isinstance(state.get("attempt_count"), int):
             retry_count = state["attempt_count"]
-    status = "success" if result.succeeded else "failure"
     record = new_record(
         timestamp=timestamp(),
         conversation_id=conversation_id,
         prompt=prompt,
         response=response,
-        status=status,
+        status="success" if result.succeeded else "failure",
         action=action if isinstance(action, str) else None,
         latency_ms=result.elapsed_ms,
         retry_count=retry_count,
@@ -79,6 +116,7 @@ def _send(client: RoutingEngineApiClient, prompt: str, retry: bool) -> None:
         error=result.error,
         diagnostics=diagnostics if isinstance(diagnostics, dict) else None,
         developer_mode=st.session_state.developer_mode or isinstance(diagnostics, dict),
+        has_image=image is not None,
     )
     st.session_state.evaluation_history.append(record)
     if st.session_state.evaluation_mode:
@@ -91,7 +129,6 @@ def _send(client: RoutingEngineApiClient, prompt: str, retry: bool) -> None:
 
 
 def _failure_message(diagnostics: dict[str, object]) -> str:
-    """Prefer the diagnosed upstream classification over a generic API error message."""
     stage = diagnostics.get("failure_stage", "unknown")
     reason = diagnostics.get("failure_reason", "UNKNOWN")
     upstream_status = diagnostics.get("upstream_http_status", diagnostics.get("http_status"))

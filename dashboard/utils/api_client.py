@@ -29,12 +29,24 @@ class RoutingEngineApiClient:
         self._timeout = timeout
 
     def chat(
-        self, conversation_id: str, message: str, retry: bool = False, developer_mode: bool = False
+        self,
+        conversation_id: str,
+        message: str,
+        retry: bool = False,
+        developer_mode: bool = False,
+        image: dict[str, str] | None = None,
     ) -> ApiResult:
+        body: dict[str, object] = {
+            "conversation_id": conversation_id,
+            "message": message,
+            "retry": retry,
+        }
+        if image is not None:
+            body["image"] = image
         return self._request(
             "POST",
             "/chat",
-            {"conversation_id": conversation_id, "message": message, "retry": retry},
+            body,
             developer_mode,
         )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from schemas.models import ProviderResponse, RouterDecision, RouterRequest
+from schemas.models import ProviderRequest, ProviderResponse, RouterDecision, RouterRequest
 
 
 class BaseRouter(ABC):
@@ -19,8 +19,8 @@ class BaseRouter(ABC):
 
 class BaseProvider(ABC):
     @abstractmethod
-    async def generate(self, prompt: str) -> ProviderResponse:
-        """Generate a response from the supplied user prompt only."""
+    async def generate(self, request: ProviderRequest) -> ProviderResponse:
+        """Generate a response from a validated text or text-and-image request."""
 
     @abstractmethod
     async def health(self) -> str:

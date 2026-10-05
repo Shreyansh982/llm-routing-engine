@@ -1,4 +1,4 @@
-"""Optional live OpenRouter/Groq integration checks, enabled explicitly in CI or development."""
+"""Optional four-backend integration checks, enabled explicitly in CI or development."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from api.main import build_engine, create_app
 from config.settings import Settings
-from schemas.models import ChatRequest, RouterRequest
+from schemas.models import ChatRequest, ProviderRequest, RouterRequest
 
 pytestmark = pytest.mark.cloud
 
@@ -32,15 +32,15 @@ def test_configured_cloud_routers_providers_and_end_to_end_flow() -> None:
         latest_user_message="Write a short Python function.",
         attempt=0,
         max_attempts=settings.max_retries,
-        available_providers=registry.available_for_router([]),
+        available_task_groups=registry.available_task_groups(),
     )
     decision = asyncio.run(engine._primary.decide(request))
-    assert engine._validator.validate(decision, []).selected_provider in {
-        provider.id for provider in registry.list_providers()
-    }
+    assert engine._validator.validate(decision, registry.available_task_groups(), False).task_group
 
     for provider in registry.list_providers():
-        response = asyncio.run(engine._dispatcher.dispatch(provider.id, "Reply with a short greeting."))
+        response = asyncio.run(
+            engine._dispatcher.dispatch(provider.id, ProviderRequest(text="Reply with a short greeting."))
+        )
         assert response.response.strip()
 
     result = asyncio.run(

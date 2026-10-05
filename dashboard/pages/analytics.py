@@ -51,13 +51,13 @@ def render() -> None:
             )
         )
         latency_chart.update_layout(title="Latency over time", yaxis_title="Milliseconds", height=330)
-        st.plotly_chart(latency_chart, use_container_width=True, config=PLOTLY_CONFIG)
+        st.plotly_chart(latency_chart, width="stretch", config=PLOTLY_CONFIG)
     with right:
         outcome_chart = go.Figure(
             go.Bar(x=["Success", "Failure"], y=[len(successful), failed], marker_color=["#2ca02c", "#d62728"])
         )
         outcome_chart.update_layout(title="Success vs Failure", height=330)
-        st.plotly_chart(outcome_chart, use_container_width=True, config=PLOTLY_CONFIG)
+        st.plotly_chart(outcome_chart, width="stretch", config=PLOTLY_CONFIG)
 
     _success_rate_trend(records)
 
@@ -77,7 +77,7 @@ def _distribution_chart(container: object, title: str, records: list[dict[str, o
     counts = Counter(values)
     chart = go.Figure(go.Bar(x=list(counts), y=list(counts.values())))
     chart.update_layout(title=title, height=300)
-    container.plotly_chart(chart, use_container_width=True, config=PLOTLY_CONFIG)
+    container.plotly_chart(chart, width="stretch", config=PLOTLY_CONFIG)
 
 
 def _success_rate_trend(records: list[dict[str, object]]) -> None:
@@ -99,4 +99,4 @@ def _success_rate_trend(records: list[dict[str, object]]) -> None:
         yaxis=dict(title="Success rate (%)", range=[0, 100]),
         height=300,
     )
-    st.plotly_chart(chart, use_container_width=True, config=PLOTLY_CONFIG)
+    st.plotly_chart(chart, width="stretch", config=PLOTLY_CONFIG)

@@ -41,10 +41,10 @@ def request_status_card(status: str, action: str, latency_ms: float) -> None:
 
 def developer_table(rows: list[dict[str, Any]], developer_mode: bool, public_columns: list[str]) -> None:
     if developer_mode:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
         return
     st.dataframe(
         [{column: row.get(column) for column in public_columns} for row in rows],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )

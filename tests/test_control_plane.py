@@ -44,7 +44,7 @@ def test_all_builtin_policies_rank_registry_metadata_deterministically() -> None
 
 
 def test_v2_policy_lifecycle_evaluation_and_audit_reference() -> None:
-    engine, _, _ = make_engine(QueueRouter([decision("provider_b")]), QueueRouter([]))
+    engine, _, _ = make_engine(QueueRouter([decision()]), QueueRouter([]))
     FakeProvider.responses = {"provider_b": "answer"}
     client = TestClient(create_app(engine=engine))
     headers = {"X-Tenant-ID": "tenant-a", "X-Developer-Mode": "true"}
@@ -82,8 +82,8 @@ def test_v2_policy_lifecycle_evaluation_and_audit_reference() -> None:
 
 
 def test_v2_governance_filters_router_candidates_and_rejects_empty_sets() -> None:
-    primary = QueueRouter([decision("provider_a"), decision("provider_a")])
-    fallback = QueueRouter([decision("provider_b")])
+    primary = QueueRouter([decision(), decision()])
+    fallback = QueueRouter([decision()])
     engine, _, _ = make_engine(primary, fallback)
     FakeProvider.responses = {"provider_b": "governed answer"}
     client = TestClient(create_app(engine=engine))
@@ -99,7 +99,7 @@ def test_v2_governance_filters_router_candidates_and_rejects_empty_sets() -> Non
 
     assert policy.status_code == 200
     assert response.status_code == 200
-    assert [candidate.id for candidate in primary.calls[0].available_providers] == ["provider_b"]
+    assert [group.value for group in primary.calls[0].available_task_groups] == ["general"]
     assert response.json()["data"]["diagnostics"]["selected_provider"] == "provider_b"
 
     denied = client.put(
@@ -117,7 +117,7 @@ def test_v2_governance_filters_router_candidates_and_rejects_empty_sets() -> Non
 
 
 def test_v2_tenant_conversations_are_isolated() -> None:
-    engine, _, _ = make_engine(QueueRouter([decision("provider_a"), decision("provider_a")]), QueueRouter([]))
+    engine, _, _ = make_engine(QueueRouter([decision(), decision()]), QueueRouter([]))
     FakeProvider.responses = {"provider_a": "answer"}
     client = TestClient(create_app(engine=engine))
 

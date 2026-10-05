@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from core.interfaces import BaseRouter
-from schemas.models import ChatRequest, RouterAction, RouterDecision, RouterRequest
+from schemas.models import ChatRequest, RouterAction, RouterDecision, RouterRequest, TaskGroup
 from tests.conftest import QueueRouter, make_engine, provider
 
 
@@ -31,14 +31,14 @@ class CapabilityEvaluationRouter(BaseRouter):
 
     async def decide(self, request: RouterRequest) -> RouterDecision:
         query = request.latest_user_message.lower()
-        strength = (
-            "coding" if any(word in query for word in ("python", "typescript", "sql", "refactor", "implement"))
-            else "summarization" if any(word in query for word in ("summarize", "summary", "extract"))
-            else "creative_writing" if any(word in query for word in ("poem", "playful", "fantasy", "warm"))
-            else "reasoning"
+        group = (
+            TaskGroup.CODING_REASONING
+            if any(word in query for word in ("python", "typescript", "sql", "refactor", "implement", "algorithm", "logic", "architectural"))
+            else TaskGroup.CREATIVE
+            if any(word in query for word in ("poem", "playful", "fantasy", "warm"))
+            else TaskGroup.GENERAL
         )
-        selected = next(item.id for item in request.available_providers if strength in item.capabilities.strengths)
-        return RouterDecision(action=RouterAction.ANSWER, selected_provider=selected, confidence=0.9, reason=strength)
+        return RouterDecision(action=RouterAction.ANSWER, task_group=group, confidence=0.9, reason=group.value)
 
     async def health(self) -> str:
         return "healthy"
@@ -47,8 +47,9 @@ class CapabilityEvaluationRouter(BaseRouter):
 def test_routing_quality_dataset_meets_documented_acceptance_threshold() -> None:
     router = CapabilityEvaluationRouter()
     providers = [
-        provider("provider_a", ["coding", "reasoning"]),
-        provider("provider_b", ["summarization", "creative_writing"]),
+        provider("provider_a", ["coding", "reasoning"], task_group=TaskGroup.CODING_REASONING),
+        provider("provider_b", ["summarization"], task_group=TaskGroup.GENERAL),
+        provider("provider_c", ["creative_writing"], task_group=TaskGroup.CREATIVE),
     ]
     engine, _, registry = make_engine(router, QueueRouter([]), providers)
     matches = 0

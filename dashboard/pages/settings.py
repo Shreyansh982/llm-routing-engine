@@ -47,6 +47,6 @@ def render(client: RoutingEngineApiClient) -> None:
     router_rows = router_diagnostics.get("configured_routers", []) if isinstance(router_diagnostics, dict) else []
     if st.session_state.developer_mode:
         st.subheader("Configured Routers")
-        st.dataframe(router_rows, use_container_width=True, hide_index=True)
+        st.dataframe(router_rows, width="stretch", hide_index=True)
     else:
         st.caption("Enable Developer Mode to view backend, model, endpoint, timeout, and retry configuration.")

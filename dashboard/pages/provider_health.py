@@ -30,6 +30,8 @@ def render(client: RoutingEngineApiClient) -> None:
     st.subheader("Providers")
     provider_rows = snapshot["providers"]
     developer_table(provider_rows, st.session_state.developer_mode, ["id", "enabled", "status"])
+    st.subheader("Backend circuits")
+    developer_table(snapshot.get("backends", []), True, ["backend", "state", "consecutive_failures"])
     if not st.session_state.developer_mode:
         st.caption("Enable Developer Mode to view API reachability and health-check timing.")
 
@@ -68,7 +70,7 @@ def _refresh(client: RoutingEngineApiClient) -> dict[str, object]:
                 if isinstance(item, dict) and isinstance(item.get("id"), str)
             }
         for router_id, status in router_data.items():
-            if router_id == "diagnostics":
+            if router_id in {"diagnostics", "backends"}:
                 continue
             config = router_config_by_id.get(router_id, {})
             routers.append(
@@ -81,7 +83,9 @@ def _refresh(client: RoutingEngineApiClient) -> dict[str, object]:
                     "api_reachability": router_result.succeeded,
                 }
             )
-    statuses = provider_result.payload.get("data", {}) if provider_result.succeeded else {}
+    health_data = provider_result.payload.get("data", {}) if provider_result.succeeded else {}
+    statuses = health_data.get("providers", {}) if isinstance(health_data, dict) else {}
+    circuit_data = health_data.get("backends", {}) if isinstance(health_data, dict) else {}
     enabled_by_id: dict[str, bool] = {}
     provider_data = list_result.payload.get("data", {}) if list_result.succeeded else {}
     provider_config_by_id: dict[str, dict[str, object]] = {}
@@ -110,5 +114,17 @@ def _refresh(client: RoutingEngineApiClient) -> dict[str, object]:
         }
         for provider_id, status in statuses.items()
     ] if isinstance(statuses, dict) else []
+    backends = [
+        {"backend": backend, **details}
+        for backend, details in circuit_data.items()
+        if isinstance(backend, str) and isinstance(details, dict)
+    ] if isinstance(circuit_data, dict) else []
     error = router_result.error or provider_result.error or list_result.error
-    return {"timestamp": timestamp(), "routers": routers, "providers": providers, "error": error, "elapsed_ms": elapsed_ms}
+    return {
+        "timestamp": timestamp(),
+        "routers": routers,
+        "providers": providers,
+        "backends": backends,
+        "error": error,
+        "elapsed_ms": elapsed_ms,
+    }

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from pydantic import ValidationError
 
-from registry.model_registry import ModelRegistry, UnknownProviderError
-from schemas.models import RouterAction, RouterDecision
+from schemas.models import RouterAction, RouterDecision, TaskGroup
 
 
 class InvalidDecisionError(ValueError):
@@ -13,14 +12,11 @@ class InvalidDecisionError(ValueError):
 
 
 class DecisionValidator:
-    def __init__(self, registry: ModelRegistry) -> None:
-        self._registry = registry
-
     def validate(
         self,
         decision: RouterDecision | dict[str, object],
-        excluded_providers: list[str],
-        allowed_provider_ids: list[str] | None = None,
+        available_task_groups: list[TaskGroup],
+        has_image: bool,
     ) -> RouterDecision:
         try:
             parsed = (
@@ -29,15 +25,10 @@ class DecisionValidator:
         except ValidationError as exc:
             raise InvalidDecisionError("Router decision does not match the required schema") from exc
 
-        if parsed.selected_provider:
-            try:
-                enabled = self._registry.is_enabled(parsed.selected_provider)
-            except UnknownProviderError as exc:
-                raise InvalidDecisionError("Router selected an unknown provider") from exc
-            if not enabled:
-                raise InvalidDecisionError("Router selected a disabled provider")
-            if parsed.selected_provider in excluded_providers:
-                raise InvalidDecisionError("Router selected an excluded provider")
-            if allowed_provider_ids is not None and parsed.selected_provider not in allowed_provider_ids:
-                raise InvalidDecisionError("Router selected a governance-ineligible provider")
+        if parsed.action == RouterAction.ANSWER:
+            assert parsed.task_group is not None
+            if parsed.task_group not in available_task_groups:
+                raise InvalidDecisionError("Router selected an unavailable task group")
+            if has_image and parsed.task_group != TaskGroup.MULTIMODAL:
+                raise InvalidDecisionError("Image requests must use the multimodal task group")
         return parsed

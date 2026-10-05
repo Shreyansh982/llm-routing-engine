@@ -5,6 +5,7 @@ import pytest
 from registry.model_registry import ModelRegistry, UnknownProviderError
 from state.manager import ConversationNotFoundError, ConversationStateManager
 from tests.conftest import decision, provider
+from schemas.models import TaskGroup
 from validation.decision_validator import DecisionValidator, InvalidDecisionError
 
 
@@ -37,15 +38,38 @@ def test_registry_preserves_order_and_excludes_disabled_metadata_from_router() -
     assert [item.id for item in registry.available_for_router([])] == ["provider_b"]
 
 
-def test_validator_rejects_unknown_disabled_excluded_and_invalid_schema() -> None:
-    registry = ModelRegistry([provider("provider_a", ["coding"]), provider("provider_b", ["creative_writing"], enabled=False)])
-    validator = DecisionValidator(registry)
-    assert validator.validate(decision("provider_a"), []) == decision("provider_a")
-    for raw, excluded in [
-        ({"action": "ANSWER", "selected_provider": "missing", "confidence": 0.9, "reason": "x"}, []),
-        (decision("provider_b"), []),
-        (decision("provider_a"), ["provider_a"]),
-        ({"action": "BAD", "confidence": 0.1, "reason": "x"}, []),
-    ]:
+def test_registry_candidate_order_uses_priority_unless_v2_policy_order_is_explicit() -> None:
+    registry = ModelRegistry(
+        [
+            provider("second", ["general"], priority=2),
+            provider("first", ["general"], priority=1),
+        ]
+    )
+    default = registry.candidates_for(
+        "general",
+        requires_image=False,
+        excluded_provider_ids=[],
+        allowed_provider_ids=["second", "first"],
+    )
+    policy = registry.candidates_for(
+        "general",
+        requires_image=False,
+        excluded_provider_ids=[],
+        allowed_provider_ids=["second", "first"],
+        preserve_allowed_order=True,
+    )
+    assert [item.id for item in default] == ["first", "second"]
+    assert [item.id for item in policy] == ["second", "first"]
+
+
+def test_validator_rejects_unavailable_group_image_mismatch_and_invalid_schema() -> None:
+    validator = DecisionValidator()
+    assert validator.validate(decision(), [TaskGroup.GENERAL], False) == decision()
+    invalid = [
+        ({"action": "ANSWER", "task_group": "creative", "confidence": 0.9, "reason": "x"}, [TaskGroup.GENERAL], False),
+        (decision(TaskGroup.GENERAL), [TaskGroup.GENERAL, TaskGroup.MULTIMODAL], True),
+        ({"action": "BAD", "confidence": 0.1, "reason": "x"}, [TaskGroup.GENERAL], False),
+    ]
+    for raw, groups, has_image in invalid:
         with pytest.raises(InvalidDecisionError):
-            validator.validate(raw, excluded)
+            validator.validate(raw, groups, has_image)

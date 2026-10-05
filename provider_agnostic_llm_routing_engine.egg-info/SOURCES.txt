@@ -36,11 +36,11 @@ provider_agnostic_llm_routing_engine.egg-info/requires.txt
 provider_agnostic_llm_routing_engine.egg-info/top_level.txt
 providers/__init__.py
 providers/adapter.py
+providers/circuit_breaker.py
 providers/dispatcher.py
 registry/__init__.py
 registry/model_registry.py
 routers/__init__.py
-routers/default_router.py
 routers/http_router.py
 routing/__init__.py
 routing/engine.py
@@ -49,11 +49,14 @@ schemas/models.py
 state/__init__.py
 state/manager.py
 tests/test_api.py
+tests/test_circuit_breaker.py
 tests/test_cloud_integration.py
 tests/test_cloud_router.py
+tests/test_configuration_migration.py
 tests/test_control_plane.py
 tests/test_dashboard_records.py
 tests/test_gateway_and_adapters.py
+tests/test_migration_routing.py
 tests/test_routing_engine.py
 tests/test_routing_evaluation.py
 tests/test_state_registry_validator.py

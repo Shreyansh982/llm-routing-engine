@@ -40,10 +40,13 @@ def render() -> None:
 
     with st.expander("Router and provider diagnostics", expanded=True):
         st.write(f"Router used: `{diagnostics.get('router_used')}`")
-        st.write(f"Selected provider: `{diagnostics.get('provider_id', diagnostics.get('selected_provider'))}`")
+        st.write(f"Task group: `{diagnostics.get('task_group')}`")
+        st.write(f"Initial provider: `{diagnostics.get('initial_provider')}`")
+        st.write(f"Final provider: `{diagnostics.get('final_provider')}`")
         st.write(f"Provider backend: `{diagnostics.get('provider_backend', diagnostics.get('backend'))}`")
         st.write(f"Configured model: `{diagnostics.get('configured_model', diagnostics.get('model'))}`")
         st.write(f"Fallback used: {diagnostics.get('fallback_used')}")
+        st.write(f"Fallback count: {diagnostics.get('fallback_count', 0)}")
         st.write(f"Retry count: {diagnostics.get('retry_count')}")
         _render_latency_table(diagnostics.get("latency_breakdown"))
         st.write(f"Failure stage: `{diagnostics.get('failure_stage', 'none')}`")
@@ -57,6 +60,14 @@ def render() -> None:
             st.error(f"Provider error: {diagnostics['provider_error']}")
         if record["error"]:
             st.error(record["error"])
+        _render_attempts("Router attempts", diagnostics.get("router_attempts"))
+        _render_attempts("Provider fallback path", diagnostics.get("fallback_path"))
+        circuits = diagnostics.get("circuit_state")
+        if isinstance(circuits, dict):
+            _render_attempts(
+                "Backend circuits",
+                [{"backend": backend, **details} for backend, details in circuits.items() if isinstance(details, dict)],
+            )
 
 
 def _render_routing_explanation(record: dict[str, Any], diagnostics: dict[str, Any]) -> None:
@@ -66,7 +77,7 @@ def _render_routing_explanation(record: dict[str, Any], diagnostics: dict[str, A
     intent.markdown("**Intent**")
     intent.write(record.get("prompt", "Not available"))
     selected.markdown("**Selected Provider**")
-    provider_id = diagnostics.get("provider_id", diagnostics.get("selected_provider", "No provider selected"))
+    provider_id = diagnostics.get("final_provider", diagnostics.get("provider_id", "No provider selected"))
     selected.write(f"`{provider_id}`")
     selected.caption(f"via {diagnostics.get('router_used', 'No Router recorded')}")
     reason.markdown("**Reason**")
@@ -74,11 +85,11 @@ def _render_routing_explanation(record: dict[str, Any], diagnostics: dict[str, A
     if diagnostics.get("fallback_used"):
         reason.caption("Fallback ladder used")
 
-    st.markdown("**Required Capabilities**")
-    st.caption("The API exposes the capability descriptors considered by the Router.")
+    st.markdown("**Eligible candidate capabilities**")
+    st.caption("These developer diagnostics come from the Registry; concrete candidates are not sent to the Router.")
     capabilities = diagnostics.get("capabilities_considered", [])
     if capabilities:
-        st.dataframe(_capability_rows(capabilities), use_container_width=True, hide_index=True)
+        st.dataframe(_capability_rows(capabilities), width="stretch", hide_index=True)
     else:
         st.caption("No capability descriptors were returned for this request.")
 
@@ -115,9 +126,15 @@ def _render_latency_table(latency: Any) -> None:
             {"Stage": "Response gateway", "Latency (ms)": f"{float(latency.get('gateway_ms', 0) or 0):.2f}"},
             {"Stage": "Total", "Latency (ms)": f"{float(latency.get('total_ms', 0) or 0):.2f}"},
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
+
+
+def _render_attempts(title: str, attempts: Any) -> None:
+    if isinstance(attempts, list) and attempts:
+        st.markdown(f"**{title}**")
+        st.dataframe(attempts, width="stretch", hide_index=True)
 
 
 def _render_routing_timeline(record: dict[str, Any], diagnostics: dict[str, Any]) -> None:
@@ -160,7 +177,7 @@ def _render_routing_timeline(record: dict[str, Any], diagnostics: dict[str, Any]
         legend_title="Stage",
         margin=dict(l=20, r=20, t=30, b=40),
     )
-    st.plotly_chart(timeline, use_container_width=True, config=PLOTLY_CONFIG)
+    st.plotly_chart(timeline, width="stretch", config=PLOTLY_CONFIG)
 
     latency_chart = go.Figure(
         go.Bar(
@@ -177,4 +194,4 @@ def _render_routing_timeline(record: dict[str, Any], diagnostics: dict[str, Any]
         height=310,
         margin=dict(l=20, r=20, t=50, b=40),
     )
-    st.plotly_chart(latency_chart, use_container_width=True, config=PLOTLY_CONFIG)
+    st.plotly_chart(latency_chart, width="stretch", config=PLOTLY_CONFIG)

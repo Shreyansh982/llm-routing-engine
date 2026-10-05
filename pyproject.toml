@@ -50,7 +50,7 @@ namespaces = false
 testpaths = ["tests"]
 addopts = "--strict-markers --cov --cov-report=term-missing"
 markers = [
-    "cloud: integration tests that require configured OpenRouter and Groq credentials",
+    "cloud: opt-in integration tests that require configured Google, NVIDIA, OpenRouter, and Groq credentials",
 ]
 
 [tool.coverage.run]

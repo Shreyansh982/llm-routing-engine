@@ -8,7 +8,7 @@ from tests.conftest import FakeProvider, QueueRouter, decision, make_engine
 
 
 def test_api_returns_common_success_envelopes_and_provider_safe_data() -> None:
-    engine, _, _ = make_engine(QueueRouter([decision("provider_a")]), QueueRouter([]))
+    engine, _, _ = make_engine(QueueRouter([decision()]), QueueRouter([]))
     FakeProvider.responses = {"provider_a": "answer"}
     client = TestClient(create_app(engine=engine))
 
@@ -26,7 +26,7 @@ def test_api_returns_common_success_envelopes_and_provider_safe_data() -> None:
 
 
 def test_developer_header_returns_diagnostics_without_secrets() -> None:
-    engine, _, _ = make_engine(QueueRouter([decision("provider_a")]), QueueRouter([]))
+    engine, _, _ = make_engine(QueueRouter([decision()]), QueueRouter([]))
     FakeProvider.responses = {"provider_a": "answer"}
     client = TestClient(create_app(engine=engine))
 
@@ -67,7 +67,7 @@ def test_developer_configuration_metadata_is_header_gated_and_secret_safe() -> N
 
 
 def test_provider_failure_returns_partial_developer_diagnostics_and_classification() -> None:
-    engine, _, _ = make_engine(QueueRouter([decision("provider_a")]), QueueRouter([]))
+    engine, _, _ = make_engine(QueueRouter([decision()]), QueueRouter([]))
     FakeProvider.fail = True
     client = TestClient(create_app(engine=engine))
 
@@ -82,8 +82,8 @@ def test_provider_failure_returns_partial_developer_diagnostics_and_classificati
     assert body["error"]["failure_level"] == "provider"
     assert body["diagnostics"]["developer_mode"] is True
     assert body["diagnostics"]["failure_level"] == "provider"
-    assert body["diagnostics"]["selected_provider"] == "provider_a"
-    assert body["diagnostics"]["backend"] == "openrouter"
+    assert "selected_provider" not in body["diagnostics"]
+    assert body["diagnostics"]["fallback_path"]
     assert body["diagnostics"]["provider_error"]
     assert body["diagnostics"]["http_status"] == 503
     assert body["diagnostics"]["failure_stage"] == "provider"
@@ -91,7 +91,7 @@ def test_provider_failure_returns_partial_developer_diagnostics_and_classificati
 
 
 def test_normal_provider_failure_preserves_error_contract_without_diagnostics() -> None:
-    engine, _, _ = make_engine(QueueRouter([decision("provider_a")]), QueueRouter([]))
+    engine, _, _ = make_engine(QueueRouter([decision()]), QueueRouter([]))
     FakeProvider.fail = True
     client = TestClient(create_app(engine=engine))
 
@@ -104,7 +104,7 @@ def test_normal_provider_failure_preserves_error_contract_without_diagnostics() 
 
 
 def test_developer_openrouter_http_429_provider_failure_retains_diagnostics() -> None:
-    engine, _, _ = make_engine(QueueRouter([decision("provider_a")]), QueueRouter([]))
+    engine, _, _ = make_engine(QueueRouter([decision()]), QueueRouter([]))
     FakeProvider.failure = ProviderUnavailableError(
         "rate limited", http_status=429, failure_reason="HTTP_429_RATE_LIMIT"
     )
@@ -122,12 +122,11 @@ def test_developer_openrouter_http_429_provider_failure_retains_diagnostics() ->
     assert diagnostics["http_status"] == 429
     assert diagnostics["failure_stage"] == "provider"
     assert diagnostics["failure_reason"] == "HTTP_429_RATE_LIMIT"
-    assert diagnostics["provider_id"] == "provider_a"
+    assert diagnostics.get("provider_id") is None
     assert diagnostics["router_used"] == "primary_router"
-    assert diagnostics["backend"] == "openrouter"
-    assert diagnostics["configured_model"] == "provider_a-model"
+    assert diagnostics["fallback_path"][0]["provider_id"] == "provider_a"
     assert diagnostics["retry_count"] == 0
-    assert diagnostics["fallback_used"] is False
+    assert diagnostics["fallback_used"] is True
     assert diagnostics["timestamp"]
 
 

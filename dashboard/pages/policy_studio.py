@@ -31,7 +31,7 @@ def render(client: RoutingEngineApiClient) -> None:
     if not isinstance(policies, list):
         policies = []
     st.subheader("Active policies")
-    st.dataframe(policies, use_container_width=True, hide_index=True)
+    st.dataframe(policies, width="stretch", hide_index=True)
 
     with st.expander("Create built-in policy"):
         with st.form("create-policy"):
@@ -55,14 +55,14 @@ def render(client: RoutingEngineApiClient) -> None:
         policy_ids = [str(policy.get("policy_id")) for policy in policies if isinstance(policy, dict)]
         selected = st.selectbox("Policy to activate or evaluate", policy_ids)
         actions = st.columns(2)
-        if actions[0].button("Activate selected policy", use_container_width=True):
+        if actions[0].button("Activate selected policy", width="stretch"):
             result = client.activate_policy(st.session_state.tenant_id, selected)
             if result.succeeded:
                 st.success("Policy activated.")
                 st.rerun()
             else:
                 st.error(result.error or "Unable to activate policy.")
-        if actions[1].button("Evaluate candidate ordering", use_container_width=True):
+        if actions[1].button("Evaluate candidate ordering", width="stretch"):
             result = client.evaluate_policy(
                 st.session_state.tenant_id, {"routing_context": {"policy_id": selected}}
             )
@@ -76,8 +76,8 @@ def render(client: RoutingEngineApiClient) -> None:
     if isinstance(evaluation, dict):
         st.subheader("Candidate evaluation")
         st.caption("This is a deterministic metadata evaluation. No Router or provider is invoked.")
-        st.dataframe(evaluation.get("rankings", []), use_container_width=True, hide_index=True)
+        st.dataframe(evaluation.get("rankings", []), width="stretch", hide_index=True)
         exclusions = evaluation.get("exclusions", [])
         if exclusions:
             st.warning("Governance exclusions")
-            st.dataframe(exclusions, use_container_width=True, hide_index=True)
+            st.dataframe(exclusions, width="stretch", hide_index=True)

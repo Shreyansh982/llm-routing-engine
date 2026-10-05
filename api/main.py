@@ -23,10 +23,10 @@ from control_plane.repository import GovernanceRepository, PolicyAuditRepository
 from control_plane.services import CandidateSetResolver, GovernanceEvaluator, PolicyEvaluator, PolicyNotFoundError
 from control_plane.tenant import TenantContextResolver
 from gateway.response_gateway import ResponseGateway
+from providers.circuit_breaker import BackendCircuits
 from providers.dispatcher import ProviderDispatcher
 from registry.model_registry import ModelRegistry
-from routers.default_router import DeterministicDefaultRouter
-from routers.http_router import FallbackRouter, PrimaryRouter
+from routers.http_router import StructuredHTTPRouter
 from routing.engine import (
     GatewayExecutionError,
     GovernanceDeniedError,
@@ -54,16 +54,20 @@ def configure_logging() -> None:
 
 def build_engine(settings: Settings) -> RoutingEngine:
     registry = ModelRegistry(settings.provider_configs())
+    circuits = BackendCircuits(
+        failure_threshold=settings.circuit_failure_threshold,
+        open_seconds=settings.circuit_open_seconds,
+        half_open_probes=settings.circuit_half_open_probes,
+    )
     identity_terms = [term for provider in registry.list_providers() for term in provider.identity_terms]
     state = ConversationStateManager()
     return RoutingEngine(
         state_manager=state,
         registry=registry,
-        primary_router=PrimaryRouter(settings.primary_router_config()),
-        fallback_router=FallbackRouter(settings.fallback_router_config()),
-        default_router=DeterministicDefaultRouter(registry),
-        validator=DecisionValidator(registry),
-        dispatcher=ProviderDispatcher(registry, settings.request_timeout),
+        primary_router=StructuredHTTPRouter(settings.primary_router_config(), circuits),
+        fallback_router=StructuredHTTPRouter(settings.fallback_router_config(), circuits),
+        validator=DecisionValidator(),
+        dispatcher=ProviderDispatcher(registry, circuits),
         gateway=ResponseGateway(identity_terms),
         max_attempts=settings.max_retries,
     )
@@ -147,6 +151,8 @@ def _provider_diagnostics(settings: Settings) -> dict[str, object]:
                 "id": provider.id,
                 "backend": provider.backend,
                 "model": provider.model,
+                "task_group": provider.task_group,
+                "priority": provider.priority,
                 "endpoint": provider.endpoint,
                 "timeout": provider.timeout,
                 "capabilities": provider.capabilities.model_dump(),
@@ -282,7 +288,7 @@ def create_app(engine: RoutingEngine | None = None, settings: Settings | None = 
 
     @app.get("/api/v1/router/health")
     async def router_health(http_request: Request) -> dict[str, object]:
-        data: dict[str, object] = await app.state.engine.router_health()
+        data = await app.state.engine.router_health()
         if _developer_mode(http_request):
             data["diagnostics"] = _router_diagnostics(runtime_settings)
         return _success(data)
