@@ -102,6 +102,11 @@ class BackendCircuits:
     def record_success(self, backend: str) -> None:
         self._circuits[backend].record_success()
 
+    def release_probe(self, backend: str) -> None:
+        circuit = self._circuits[backend]
+        if circuit.state == CircuitState.HALF_OPEN:
+            circuit.half_open_inflight = max(0, circuit.half_open_inflight - 1)
+
     def record_failure(self, backend: str, backend_transient: bool) -> None:
         self._circuits[backend].record_failure(backend_transient)
 

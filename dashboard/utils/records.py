@@ -6,7 +6,6 @@ import csv
 import io
 import json
 from typing import Any
-from uuid import uuid4
 
 
 TECHNICAL_UNAVAILABLE = "Not exposed by current API"
@@ -30,6 +29,8 @@ CSV_FIELDNAMES = [
     "latency_ms",
     "retry_count",
     "fallback_used",
+    "router_fallback_used",
+    "provider_fallback_used",
     "fallback_count",
     "fallback_path",
     "final_provider",
@@ -39,6 +40,7 @@ CSV_FIELDNAMES = [
     "action",
     "http_status",
     "upstream_http_status",
+    "upstream_status",
     "failure_stage",
     "failure_reason",
     "error",
@@ -64,9 +66,10 @@ def new_record(
     has_image: bool = False,
 ) -> dict[str, Any]:
     """Store API-observable facts only; never infer hidden backend metadata."""
-    diagnostics = diagnostics or {}
+    original_diagnostics = diagnostics
+    diagnostics = diagnostics if diagnostics is not None else {}
     return {
-        "request_id": diagnostics.get("request_id", str(uuid4())),
+        "request_id": diagnostics.get("request_id"),
         "timestamp": timestamp,
         "conversation_id": conversation_id,
         "prompt": prompt,
@@ -81,21 +84,24 @@ def new_record(
         # Retained for existing dashboard integrations; configured_model is the explicit field.
         "model": diagnostics.get("configured_model", diagnostics.get("model", TECHNICAL_UNAVAILABLE)),
         "latency_ms": round(latency_ms, 2),
-        "retry_count": retry_count,
+        "retry_count": diagnostics.get("retry_count", TECHNICAL_UNAVAILABLE),
         "fallback_used": diagnostics.get("fallback_used", TECHNICAL_UNAVAILABLE),
+        "router_fallback_used": diagnostics.get("router_fallback_used", TECHNICAL_UNAVAILABLE),
+        "provider_fallback_used": diagnostics.get("provider_fallback_used", TECHNICAL_UNAVAILABLE),
         "fallback_count": diagnostics.get("fallback_count", TECHNICAL_UNAVAILABLE),
-        "fallback_path": diagnostics.get("fallback_path", []),
+        "fallback_path": diagnostics.get("fallback_path", TECHNICAL_UNAVAILABLE),
         "final_provider": diagnostics.get("final_provider", TECHNICAL_UNAVAILABLE),
-        "router_attempts": diagnostics.get("router_attempts", []),
-        "circuit_state": diagnostics.get("circuit_state", {}),
+        "router_attempts": diagnostics.get("router_attempts", TECHNICAL_UNAVAILABLE),
+        "circuit_state": diagnostics.get("circuit_state", TECHNICAL_UNAVAILABLE),
         "status": status,
         "action": action or "",
         "http_status": diagnostics.get("http_status", http_status),
         "upstream_http_status": diagnostics.get("upstream_http_status", TECHNICAL_UNAVAILABLE),
+        "upstream_status": diagnostics.get("upstream_status", TECHNICAL_UNAVAILABLE),
         "failure_stage": diagnostics.get("failure_stage", TECHNICAL_UNAVAILABLE),
         "failure_reason": diagnostics.get("failure_reason", TECHNICAL_UNAVAILABLE),
         "error": error or "",
-        "diagnostics": diagnostics,
+        "diagnostics": original_diagnostics,
         "developer_mode": developer_mode,
     }
 
@@ -111,7 +117,11 @@ def to_csv(records: list[dict[str, Any]]) -> str:
                 fieldnames.append(fieldname)
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
-    writer.writerows(records)
+    writer.writerows(
+        {key: json.dumps(value) if isinstance(value, (dict, list)) or value is None else value
+         for key, value in record.items()}
+        for record in records
+    )
     return output.getvalue()
 
 

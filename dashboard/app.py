@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
 from dashboard.pages import analytics, chat, evaluation_history, policy_studio, provider_health, routing_details, settings
 from dashboard.utils.api_client import RoutingEngineApiClient
@@ -60,7 +61,16 @@ def main() -> None:
             ).rstrip("/")
             st.caption("The dashboard calls this API only; it never calls cloud providers directly.")
 
-    client = RoutingEngineApiClient(st.session_state.api_base_url)
+    try:
+        api_timeout = float(st.secrets.get("api_timeout", 90))
+        developer_token = st.secrets.get("developer_token")
+    except StreamlitSecretNotFoundError:
+        api_timeout, developer_token = 90.0, None
+    client = RoutingEngineApiClient(
+        st.session_state.api_base_url,
+        timeout=api_timeout,
+        developer_token=developer_token,
+    )
     render = PAGES[page]
     if page in {"Chat", "Provider Health", "Settings", "Policy Studio"}:
         render(client)

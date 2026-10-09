@@ -6,11 +6,12 @@ No dates are committed. The list distinguishes current implementation from possi
 
 - Configuration-driven two-router/twelve-task-model topology across four backends.
 - Router/execution separation, sequential fallback, bounded conversation retry, and shared backend circuits.
+- Provider-aware Google-to-NVIDIA Nemotron routing with independent per-tier timeout budgets and startup catalog verification.
 - Single-image input with non-retention, safe diagnostics, V2 policy/governance, API-only dashboard, and an opt-in cloud test.
 
 ## Near-term
 
-- Operational checks for configured live router structured-output compatibility and model availability.
+- Recurring operational checks for configured live router structured-output compatibility and model availability.
 - A reproducible evaluation dataset beyond the small deterministic regression set.
 - Operator-facing detection for deprecation, quota, and rate-limit conditions.
 

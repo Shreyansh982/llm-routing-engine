@@ -48,8 +48,8 @@ def test_developer_header_returns_diagnostics_without_secrets() -> None:
     assert diagnostics["request_timestamp"] == diagnostics["timestamp"]
     assert diagnostics["capabilities_considered"]
     assert diagnostics["latency_breakdown"]["total_ms"] >= 0
-    assert "policy_candidate_ids" not in diagnostics
-    assert "governance_exclusions" not in diagnostics
+    assert diagnostics["policy_candidate_ids"] is None
+    assert diagnostics["governance_exclusions"] is None
     assert "api_key" not in str(diagnostics).lower()
 
 
@@ -82,7 +82,7 @@ def test_provider_failure_returns_partial_developer_diagnostics_and_classificati
     assert body["error"]["failure_level"] == "provider"
     assert body["diagnostics"]["developer_mode"] is True
     assert body["diagnostics"]["failure_level"] == "provider"
-    assert "selected_provider" not in body["diagnostics"]
+    assert body["diagnostics"]["selected_provider"] is None
     assert body["diagnostics"]["fallback_path"]
     assert body["diagnostics"]["provider_error"]
     assert body["diagnostics"]["http_status"] == 503
@@ -119,7 +119,8 @@ def test_developer_openrouter_http_429_provider_failure_retains_diagnostics() ->
     diagnostics = response.json()["diagnostics"]
     assert response.status_code == 503  # Stable public provider-unavailable contract.
     assert diagnostics["upstream_http_status"] == 429
-    assert diagnostics["http_status"] == 429
+    assert diagnostics["http_status"] == 503
+    assert diagnostics["upstream_status"] == 429
     assert diagnostics["failure_stage"] == "provider"
     assert diagnostics["failure_reason"] == "HTTP_429_RATE_LIMIT"
     assert diagnostics.get("provider_id") is None

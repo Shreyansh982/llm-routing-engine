@@ -22,7 +22,8 @@ def render() -> None:
     successful = [record for record in records if record["status"] == "success"]
     failed = len(records) - len(successful)
     latencies = [record["latency_ms"] for record in records]
-    retries = [record for record in records if (record["retry_count"] or 0) > 0]
+    retry_records = [record for record in records if isinstance(record.get("retry_count"), int)]
+    retries = [record for record in retry_records if record["retry_count"] > 0]
     primary_metrics = st.columns(4)
     primary_metrics[0].metric("Total requests", len(records))
     primary_metrics[1].metric("Successful", len(successful))
@@ -31,7 +32,7 @@ def render() -> None:
     secondary_metrics = st.columns(3)
     secondary_metrics[0].metric("Average latency", f"{sum(latencies) / len(latencies):.0f} ms")
     secondary_metrics[1].metric("Median latency", f"{median(latencies):.0f} ms")
-    secondary_metrics[2].metric("Retry rate", f"{len(retries) / len(records):.0%}")
+    secondary_metrics[2].metric("Retry rate", f"{len(retries) / len(retry_records):.0%}" if retry_records else TECHNICAL_UNAVAILABLE)
     fallback_values = [record["fallback_used"] for record in records if isinstance(record["fallback_used"], bool)]
     fallback_caption = (
         f"Fallback rate: {sum(fallback_values) / len(fallback_values):.0%}"

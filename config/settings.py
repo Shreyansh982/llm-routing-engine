@@ -21,8 +21,8 @@ class RouterBackendConfig(BaseModel):
     api_key: SecretStr
     timeout: float = Field(gt=0)
     temperature: float = Field(default=0.0, ge=0, le=2)
-    max_tokens: int = Field(default=96, gt=0)
-    reasoning_effort: str | None = "none"
+    max_tokens: int = Field(default=128, gt=0)
+    reasoning_effort: str | None = "low"
 
 
 class Settings(BaseSettings):
@@ -50,10 +50,15 @@ class Settings(BaseSettings):
     fallback_router_backend: str | None = None
     fallback_router_model: str | None = None
     max_retries: int = Field(default=3, ge=0)
-    request_timeout: float = Field(default=30, gt=0)
+    request_timeout: float = Field(default=20, gt=0)
+    overall_request_timeout: float = Field(default=60, gt=0)
+    developer_mode_enabled: bool = False
+    developer_token: SecretStr | None = None
+    max_image_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
+    router_timeout: float = Field(default=10, gt=0)
     router_temperature: float = Field(default=0.0, ge=0, le=2)
-    router_max_tokens: int = Field(default=96, gt=0)
-    router_reasoning_effort: str | None = "none"
+    router_max_tokens: int = Field(default=128, gt=0)
+    router_reasoning_effort: str | None = "low"
     circuit_failure_threshold: int = Field(default=3, ge=1)
     circuit_open_seconds: float = Field(default=30, gt=0)
     circuit_half_open_probes: int = Field(default=1, ge=1)
@@ -95,7 +100,7 @@ class Settings(BaseSettings):
             endpoint=self._chat_endpoint(backend),
             model=model,
             api_key=self._api_key(backend),
-            timeout=self.request_timeout,
+            timeout=self.router_timeout,
             temperature=self.router_temperature,
             max_tokens=self.router_max_tokens,
             reasoning_effort=self.router_reasoning_effort,

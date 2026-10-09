@@ -59,7 +59,7 @@ def test_failed_half_open_probe_reopens_circuit() -> None:
     assert circuit.opened_at == 31
 
 
-@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
 def test_backend_http_failures_are_transient(status: int) -> None:
     assert classify_http_failure(status, "temporary backend failure") == FailureScope.BACKEND_TRANSIENT
 

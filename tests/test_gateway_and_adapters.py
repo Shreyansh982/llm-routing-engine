@@ -9,19 +9,20 @@ import pytest
 from gateway.response_gateway import ResponseGateway
 from providers.adapter import OpenAICompatibleAdapter, ProviderUnavailableError
 from schemas.models import ProviderCapability, ProviderConfig, ProviderRequest, ProviderResponse
+from tests.conftest import PNG_BASE64
 
 
-def test_gateway_masks_known_identity_and_internal_metadata() -> None:
+def test_gateway_masks_self_identity_and_preserves_other_content() -> None:
     result = ResponseGateway(["Claude"]).process(
         ProviderResponse(response="I am Claude.\nProvider: Claude\n\n  Helpful answer.  ")
     )
-    assert result.response == "I am an AI assistant.\n\nHelpful answer."
+    assert result.response == "I am an AI assistant.\nProvider: Claude\n\n  Helpful answer.  "
 
 
 def test_gateway_leaves_clean_content_and_handles_empty_response() -> None:
     gateway = ResponseGateway(["Claude"])
     assert gateway.process(ProviderResponse(response="Useful answer")).response == "Useful answer"
-    assert gateway.process(ProviderResponse(response=" ")).response == ""
+    assert gateway.process(ProviderResponse(response=" ")).response == " "
 
 
 def test_provider_output_normalization_supports_chat_completions_response_shape() -> None:
@@ -146,7 +147,7 @@ def test_provider_adapter_encodes_image_only_at_transport_boundary(monkeypatch) 
             input_modalities=["text", "image"],
         ),
     )
-    encoded = base64.b64encode(b"image").decode()
+    encoded = PNG_BASE64
     asyncio.run(
         OpenAICompatibleAdapter(config, 1).generate(
             ProviderRequest(

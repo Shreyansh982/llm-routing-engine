@@ -19,7 +19,10 @@ os.environ.update(
         "PRIMARY_ROUTER_BACKEND": "google",
         "PRIMARY_ROUTER_MODEL": "gemini-3.8-flash",
         "FALLBACK_ROUTER_BACKEND": "nvidia",
-        "FALLBACK_ROUTER_MODEL": "z-ai/glm-5-3-flash",
+        "FALLBACK_ROUTER_MODEL": "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "ROUTER_TIMEOUT": "10",
+        "DEVELOPER_MODE_ENABLED": "true",
+        "ROUTER_REASONING_EFFORT": "low",
         "PROVIDERS_JSON": json.dumps(
             [
                 {
@@ -44,6 +47,8 @@ os.environ.update(
             ]
         ),
     }
+    if os.getenv("RUN_CLOUD_INTEGRATION") != "1"
+    else {}
 )
 
 from core.interfaces import BaseProvider, BaseRouter
@@ -63,6 +68,9 @@ from schemas.models import (
 )
 from state.manager import ConversationStateManager
 from validation.decision_validator import DecisionValidator
+
+
+PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII="
 
 
 def provider(

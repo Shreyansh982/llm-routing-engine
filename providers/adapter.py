@@ -7,6 +7,12 @@ from typing import Any
 import httpx
 
 from core.interfaces import BaseProvider
+from providers.model_catalog import (
+    ModelCatalogError,
+    ModelVerificationTarget,
+    load_model_catalog,
+    resolve_catalog_model_id,
+)
 from schemas.models import (
     FailureScope,
     ProviderConfig,
@@ -29,7 +35,9 @@ def classify_http_failure(status: int, response_text: str) -> FailureScope:
     )
     if any(marker in text for marker in model_specific):
         return FailureScope.MODEL_SPECIFIC
-    if status in {429, 500, 502, 503, 504}:
+    if status == 429:
+        return FailureScope.MODEL_SPECIFIC
+    if status >= 500:
         return FailureScope.BACKEND_TRANSIENT
     if status == 404:
         return FailureScope.MODEL_SPECIFIC
@@ -97,15 +105,21 @@ class OpenAICompatibleAdapter(BaseProvider):
 
     async def health(self) -> str:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.get(self._models_endpoint(), headers=self._headers())
-                response.raise_for_status()
-                models = response.json()["data"]
-            model_ids = {
-                item["id"] for item in models if isinstance(item, dict) and isinstance(item.get("id"), str)
-            }
-            return "healthy" if self._config.model in model_ids else "unhealthy"
-        except (httpx.HTTPError, KeyError, TypeError, ValueError):
+            catalog_ids = await load_model_catalog(
+                ModelVerificationTarget(
+                    name=self._config.id,
+                    backend=self._config.backend,
+                    endpoint=self._config.endpoint,
+                    model=self._config.model,
+                    api_key=self._config.api_key,
+                    timeout=self._timeout,
+                )
+            )
+            match = resolve_catalog_model_id(
+                self._config.backend, self._config.model, catalog_ids
+            )
+            return "healthy" if match is not None else "unhealthy"
+        except ModelCatalogError:
             return "unhealthy"
 
     def _headers(self) -> dict[str, str]:
@@ -146,9 +160,3 @@ class OpenAICompatibleAdapter(BaseProvider):
         if isinstance(error, httpx.NetworkError):
             return None, "NETWORK_ERROR", FailureScope.BACKEND_TRANSIENT, False
         return None, "INVALID_PROVIDER_RESPONSE", FailureScope.MODEL_SPECIFIC, False
-
-    def _models_endpoint(self) -> str:
-        suffix = "/chat/completions"
-        if not self._config.endpoint.endswith(suffix):
-            raise ValueError("Configured provider endpoint must end with /chat/completions")
-        return f"{self._config.endpoint.removesuffix(suffix)}/models"

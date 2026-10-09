@@ -11,3 +11,5 @@ This set describes the implementation in this repository. [`.env.example`](../.e
 - [Historical implementation plan](Implementation_Plan.md) — superseded record only.
 
 Start with the repository [README](../README.md) for setup and the configured model topology.
+
+The current router ladder is Google `gemini-3.8-flash` followed by NVIDIA `nvidia/nemotron-3.5-lightning-30b-a3b`, with a separate per-tier router timeout.

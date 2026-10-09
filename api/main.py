@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -10,6 +11,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException
 
 from config.settings import Settings, get_settings
 from control_plane.models import (
@@ -25,10 +27,14 @@ from control_plane.tenant import TenantContextResolver
 from gateway.response_gateway import ResponseGateway
 from providers.circuit_breaker import BackendCircuits
 from providers.dispatcher import ProviderDispatcher
+from providers.model_catalog import ModelVerificationTarget, StartupModelVerifier
 from registry.model_registry import ModelRegistry
 from routers.http_router import StructuredHTTPRouter
 from routing.engine import (
     GatewayExecutionError,
+    DeadlineExceededError,
+    UnexpectedExecutionError,
+    InvalidRoutingRequestError,
     GovernanceDeniedError,
     ProviderExecutionError,
     RoutingEngine,
@@ -53,7 +59,12 @@ def configure_logging() -> None:
 
 
 def build_engine(settings: Settings) -> RoutingEngine:
-    registry = ModelRegistry(settings.provider_configs())
+    provider_configs = settings.provider_configs()
+    if any(provider.api_key is None for provider in provider_configs):
+        raise ValueError("Every configured provider requires an API key")
+    primary_router_config = settings.primary_router_config()
+    fallback_router_config = settings.fallback_router_config()
+    registry = ModelRegistry(provider_configs)
     circuits = BackendCircuits(
         failure_threshold=settings.circuit_failure_threshold,
         open_seconds=settings.circuit_open_seconds,
@@ -64,12 +75,46 @@ def build_engine(settings: Settings) -> RoutingEngine:
     return RoutingEngine(
         state_manager=state,
         registry=registry,
-        primary_router=StructuredHTTPRouter(settings.primary_router_config(), circuits),
-        fallback_router=StructuredHTTPRouter(settings.fallback_router_config(), circuits),
+        primary_router=StructuredHTTPRouter(primary_router_config, circuits),
+        fallback_router=StructuredHTTPRouter(fallback_router_config, circuits),
         validator=DecisionValidator(),
         dispatcher=ProviderDispatcher(registry, circuits),
         gateway=ResponseGateway(identity_terms),
         max_attempts=settings.max_retries,
+        overall_request_timeout=settings.overall_request_timeout,
+        startup_model_verifier=StartupModelVerifier(
+            [
+                ModelVerificationTarget(
+                    name="primary_router",
+                    backend=primary_router_config.backend,
+                    endpoint=primary_router_config.endpoint,
+                    model=primary_router_config.model,
+                    api_key=primary_router_config.api_key,
+                    timeout=primary_router_config.timeout,
+                    role="router",
+                ),
+                ModelVerificationTarget(
+                    name="fallback_router",
+                    backend=fallback_router_config.backend,
+                    endpoint=fallback_router_config.endpoint,
+                    model=fallback_router_config.model,
+                    api_key=fallback_router_config.api_key,
+                    timeout=fallback_router_config.timeout,
+                    role="router",
+                ),
+                *[
+                    ModelVerificationTarget(
+                        name=provider.id,
+                        backend=provider.backend,
+                        endpoint=provider.endpoint,
+                        model=provider.model,
+                        api_key=provider.api_key,
+                        timeout=provider.timeout,
+                    )
+                    for provider in provider_configs
+                ],
+            ]
+        ),
     )
 
 
@@ -84,21 +129,28 @@ def _error(code: str, message: str, failure_level: str | None = None) -> dict[st
 
 
 def _developer_mode(request: Request) -> bool:
+    settings = request.app.state.settings
+    if not settings.developer_mode_enabled:
+        return False
+    if settings.developer_token is not None and not secrets.compare_digest(
+        request.headers.get("X-Developer-Token", ""), settings.developer_token.get_secret_value()
+    ):
+        return False
     return request.headers.get("X-Developer-Mode", "").strip().lower() in {"true", "1"}
 
 
-def _request_failure_diagnostics(status_code: int, failure_level: str) -> RoutingDiagnostics:
+def _request_failure_diagnostics(request: Request, status_code: int, failure_level: str) -> RoutingDiagnostics:
     now = datetime.now(timezone.utc)
     return RoutingDiagnostics(
         developer_mode=True,
-        request_id=str(uuid4()),
+        request_id=request.state.request_id,
         timestamp=now,
         request_timestamp=now,
         completed_at=now,
         retry_count=0,
         latency_breakdown=LatencyBreakdown(router_ms=0, provider_ms=0, gateway_ms=0, total_ms=0),
         http_status=status_code,
-        failure_stage=FailureStage.NONE,
+        failure_stage=FailureStage.REQUEST,
         failure_reason="UNKNOWN",
         failure_level=failure_level,
     )
@@ -114,33 +166,16 @@ def _error_response(
 ) -> JSONResponse:
     content = _error(code, message, failure_level if _developer_mode(request) else None)
     if _developer_mode(request):
-        diagnostic = diagnostics or _request_failure_diagnostics(status_code, failure_level)
-        upstream_status = diagnostic.http_status
+        diagnostic = diagnostics or _request_failure_diagnostics(request, status_code, failure_level)
         diagnostic = diagnostic.model_copy(
             update={
-                "http_status": upstream_status if upstream_status is not None else status_code,
+                "http_status": status_code,
                 "failure_level": failure_level,
                 "completed_at": datetime.now(timezone.utc),
             }
         )
-        content["diagnostics"] = diagnostic.model_dump(mode="json", exclude_none=True)
+        content["diagnostics"] = diagnostic.model_dump(mode="json")
     return JSONResponse(status_code=status_code, content=content)
-
-
-def _provider_failure_diagnostics(diagnostics: RoutingDiagnostics | None) -> RoutingDiagnostics | None:
-    """Publish provider-error metadata before the controlled API error is formed.
-
-    The Routing Engine has already captured this information. Keeping the enrichment at
-    the API boundary preserves the frozen engine, retry, and gateway responsibilities.
-    """
-    if diagnostics is None:
-        return None
-    return diagnostics.model_copy(
-        update={
-            "provider_id": diagnostics.selected_provider,
-            "upstream_http_status": diagnostics.http_status,
-        }
-    )
 
 
 def _provider_diagnostics(settings: Settings) -> dict[str, object]:
@@ -153,7 +188,6 @@ def _provider_diagnostics(settings: Settings) -> dict[str, object]:
                 "model": provider.model,
                 "task_group": provider.task_group,
                 "priority": provider.priority,
-                "endpoint": provider.endpoint,
                 "timeout": provider.timeout,
                 "capabilities": provider.capabilities.model_dump(),
             }
@@ -166,8 +200,8 @@ def _provider_diagnostics(settings: Settings) -> dict[str, object]:
 def _router_diagnostics(settings: Settings) -> dict[str, object]:
     return {
         "configured_routers": [
-            {"id": "primary_router", **settings.primary_router_config().model_dump(exclude={"api_key"})},
-            {"id": "fallback_router", **settings.fallback_router_config().model_dump(exclude={"api_key"})},
+            {"id": "primary_router", **settings.primary_router_config().model_dump(exclude={"api_key", "endpoint"})},
+            {"id": "fallback_router", **settings.fallback_router_config().model_dump(exclude={"api_key", "endpoint"})},
         ]
     }
 
@@ -195,11 +229,40 @@ def create_app(engine: RoutingEngine | None = None, settings: Settings | None = 
         title="Provider-Agnostic LLM Routing Engine", version="0.1.0", lifespan=lifespan
     )
     app.state.engine = routing_engine
+    app.state.settings = runtime_settings
     app.state.policy_repository = policy_repository
     app.state.governance_repository = governance_repository
     app.state.policy_audit_repository = policy_audit_repository
     app.state.candidate_resolver = candidate_resolver
     app.state.tenant_resolver = tenant_resolver
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        request.state.request_id = str(uuid4())
+        try:
+            return await call_next(request)
+        except Exception as exc:
+            return await unexpected_error_handler(request, exc)
+
+    @app.exception_handler(HTTPException)
+    async def http_error_handler(request: Request, exc: HTTPException) -> JSONResponse:
+        response = _error_response(request, exc.status_code, "INVALID_REQUEST",
+                                   "Request could not be processed.", "request")
+        if exc.headers:
+            response.headers.update(exc.headers)
+        return response
+
+    @app.exception_handler(DeadlineExceededError)
+    async def deadline_handler(request: Request, exc: DeadlineExceededError) -> JSONResponse:
+        return _error_response(request, 504, exc.code, "Request deadline exceeded.", "deadline", exc.diagnostics)
+
+    @app.exception_handler(InvalidRoutingRequestError)
+    async def input_handler(request: Request, exc: InvalidRoutingRequestError) -> JSONResponse:
+        return _error_response(request, 422, exc.code, str(exc), "request", exc.diagnostics)
+
+    @app.exception_handler(UnexpectedExecutionError)
+    async def engine_unexpected_handler(request: Request, exc: UnexpectedExecutionError) -> JSONResponse:
+        return _error_response(request, 500, exc.code, "Unable to process request.", "unknown", exc.diagnostics)
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_handler(request: Request, _: RequestValidationError) -> JSONResponse:
@@ -217,7 +280,7 @@ def create_app(engine: RoutingEngine | None = None, settings: Settings | None = 
             "PROVIDER_UNAVAILABLE",
             "Selected provider is unavailable.",
             "provider",
-            _provider_failure_diagnostics(exc.diagnostics),
+            exc.diagnostics,
         )
 
     @app.exception_handler(GovernanceDeniedError)
@@ -251,15 +314,17 @@ def create_app(engine: RoutingEngine | None = None, settings: Settings | None = 
     async def unexpected_error_handler(request: Request, _: Exception) -> JSONResponse:
         # Developer Mode promises an observability envelope even for an unforeseen
         # HTTP failure. Normal users still receive the established error envelope.
+        logging.getLogger(__name__).error("request_unexpected_failure request_id=%s", request.state.request_id)
         return _error_response(request, 500, "INTERNAL_ERROR", "Unable to process request.", "unknown")
 
     @app.post("/api/v1/chat")
     async def chat(http_request: Request, request: ChatRequest) -> dict[str, object]:
         result: RoutingResponse = await app.state.engine.handle(
-            request, developer_mode=_developer_mode(http_request)
+            request, developer_mode=_developer_mode(http_request), request_id=http_request.state.request_id
         )
         data = result.model_dump(mode="json", exclude_none=True)
         if _developer_mode(http_request) and isinstance(data.get("diagnostics"), dict):
+            data["diagnostics"] = result.diagnostics.model_dump(mode="json")
             data["diagnostics"]["http_status"] = 200
         return _success(data)
 
@@ -291,11 +356,16 @@ def create_app(engine: RoutingEngine | None = None, settings: Settings | None = 
         data = await app.state.engine.router_health()
         if _developer_mode(http_request):
             data["diagnostics"] = _router_diagnostics(runtime_settings)
+        else:
+            data.pop("backends", None)
         return _success(data)
 
     @app.get("/api/v1/providers/health")
-    async def providers_health() -> dict[str, object]:
-        return _success(await app.state.engine.provider_health())
+    async def providers_health(http_request: Request) -> dict[str, object]:
+        data = await app.state.engine.provider_health()
+        if not _developer_mode(http_request):
+            data.pop("backends", None)
+        return _success(data)
 
     @app.post("/api/v2/chat")
     async def chat_v2(http_request: Request, request: V2ChatRequest) -> dict[str, object]:
@@ -305,9 +375,11 @@ def create_app(engine: RoutingEngine | None = None, settings: Settings | None = 
             developer_mode=_developer_mode(http_request),
             tenant=tenant,
             routing_context=request.routing_context,
+            request_id=http_request.state.request_id,
         )
         data = result.model_dump(mode="json", exclude_none=True)
         if _developer_mode(http_request) and isinstance(data.get("diagnostics"), dict):
+            data["diagnostics"] = result.diagnostics.model_dump(mode="json")
             data["diagnostics"]["http_status"] = 200
         return _success(data)
 

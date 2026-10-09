@@ -204,7 +204,7 @@ def test_health_snapshot_separates_provider_status_from_backend_circuits(monkeyp
                 {"success": True, "data": {"primary_router": "healthy", "fallback_router": "healthy"}},
             )
 
-        def provider_health(self):
+        def provider_health(self, developer_mode=False):
             return ApiResult(
                 200,
                 1,

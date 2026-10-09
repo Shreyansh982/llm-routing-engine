@@ -13,6 +13,12 @@ from config.settings import RouterBackendConfig
 from core.interfaces import BaseRouter
 from providers.adapter import classify_http_failure
 from providers.circuit_breaker import BackendCircuits
+from providers.model_catalog import (
+    ModelCatalogError,
+    ModelVerificationTarget,
+    load_model_catalog,
+    resolve_catalog_model_id,
+)
 from schemas.models import FailureScope, RouterDecision, RouterRequest, http_failure_reason
 
 
@@ -40,9 +46,9 @@ class RouterUnavailableError(RuntimeError):
 class StructuredHTTPRouter(BaseRouter):
     """OpenAI-compatible structured Router transport for a configured backend.
 
-    OpenRouter and Groq both use the chat-completions request/response contract. Backend
-    selection and credentials remain in ``RouterBackendConfig``; the Routing Engine only
-    depends on this interface and never receives connection information.
+    Google and NVIDIA expose the chat-completions request/response contract with different
+    structured-output controls. Backend selection and credentials remain in
+    ``RouterBackendConfig``; the Routing Engine only depends on this interface.
     """
 
     def __init__(self, config: RouterBackendConfig, circuits: BackendCircuits) -> None:
@@ -59,6 +65,18 @@ class StructuredHTTPRouter(BaseRouter):
                 failure_scope=FailureScope.BACKEND_TRANSIENT,
                 backend=self._config.backend,
             )
+        try:
+            async with asyncio.timeout(self._config.timeout):
+                decision = await self._decide_with_repair(request)
+        except TimeoutError as exc:
+            self._raise_unavailable(exc)
+        except BaseException:
+            self._circuits.release_probe(self._config.backend)
+            raise
+        self._circuits.record_success(self._config.backend)
+        return decision
+
+    async def _decide_with_repair(self, request: RouterRequest) -> RouterDecision:
         client = await self._get_client()
         try:
             response = await client.post(
@@ -70,11 +88,9 @@ class StructuredHTTPRouter(BaseRouter):
         except httpx.HTTPError as exc:
             self._raise_unavailable(exc)
         try:
-            decision = self._parse(response.json())
+            return self._parse(response.json())
         except (ValueError, ValidationError, KeyError, IndexError, TypeError):
-            decision = await self._repair(client, request)
-        self._circuits.record_success(self._config.backend)
-        return decision
+            return await self._repair(client, request)
 
     async def _repair(self, client: httpx.AsyncClient, request: RouterRequest) -> RouterDecision:
         try:
@@ -111,15 +127,22 @@ class StructuredHTTPRouter(BaseRouter):
 
     async def health(self) -> str:
         try:
-            client = await self._get_client()
-            response = await client.get(self._models_endpoint(), headers=self._headers())
-            response.raise_for_status()
-            models = response.json()["data"]
-            model_ids = {
-                item["id"] for item in models if isinstance(item, dict) and isinstance(item.get("id"), str)
-            }
-            return "healthy" if self._config.model in model_ids else "unhealthy"
-        except (httpx.HTTPError, KeyError, TypeError, ValueError):
+            catalog_ids = await load_model_catalog(
+                ModelVerificationTarget(
+                    name="router",
+                    backend=self._config.backend,
+                    endpoint=self._config.endpoint,
+                    model=self._config.model,
+                    api_key=self._config.api_key,
+                    timeout=self._config.timeout,
+                    role="router",
+                )
+            )
+            match = resolve_catalog_model_id(
+                self._config.backend, self._config.model, catalog_ids
+            )
+            return "healthy" if match is not None else "unhealthy"
+        except ModelCatalogError:
             return "unhealthy"
 
     def _headers(self) -> dict[str, str]:
@@ -128,9 +151,13 @@ class StructuredHTTPRouter(BaseRouter):
     def _payload(self, request: RouterRequest, repair: bool = False) -> dict[str, Any]:
         instruction = (
             "Classify the request into exactly one available task group. "
-            "Return a decision that conforms exactly to the supplied JSON schema. "
+            "Return only one JSON object with exactly these fields: "
+            '"action" (ANSWER, RETRY, CLARIFY, or STOP), "task_group" '
+            '(one available group for ANSWER, otherwise null), "confidence" '
+            "(a number from 0 to 1), and \"reason\" (a brief classification reason). "
+            "Do not answer the user's request and do not add a response field. "
             "Never select or mention a provider, backend, model, priority, endpoint, or fallback chain. "
-            "An image-bearing request must use multimodal. Use RETRY only when previous_response exists; "
+            "An image-bearing request must use multimodal. Use RETRY only when retry is true; "
             "use STOP only when no task group can be selected."
         )
         if repair:
@@ -144,18 +171,21 @@ class StructuredHTTPRouter(BaseRouter):
             "stream": False,
             "temperature": self._config.temperature,
             "max_tokens": self._config.max_tokens,
-            "response_format": {
+        }
+        if self._config.backend == "nvidia":
+            payload["response_format"] = {"type": "json_object"}
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        else:
+            payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "router_decision",
                     "strict": True,
                     "schema": RouterDecision.model_json_schema(),
                 },
-            },
-        }
-        # Reasoning controls are backend-specific and omitted unless explicitly supported.
-        if self._config.backend == "openrouter" and self._config.reasoning_effort is not None:
-            payload["reasoning"] = {"effort": self._config.reasoning_effort}
+            }
+        if self._config.backend == "google" and self._config.reasoning_effort is not None:
+            payload["reasoning_effort"] = self._config.reasoning_effort
         return payload
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -182,7 +212,7 @@ class StructuredHTTPRouter(BaseRouter):
                 http_failure_reason(status),
                 classify_http_failure(status, error.response.text),
             )
-        if isinstance(error, httpx.TimeoutException):
+        if isinstance(error, (httpx.TimeoutException, TimeoutError)):
             return None, "TIMEOUT", FailureScope.BACKEND_TRANSIENT
         if isinstance(error, httpx.NetworkError):
             return None, "NETWORK_ERROR", FailureScope.BACKEND_TRANSIENT
@@ -193,9 +223,3 @@ class StructuredHTTPRouter(BaseRouter):
         if isinstance(error, (KeyError, IndexError, TypeError, ValueError)):
             return None, "INVALID_ROUTER_JSON", FailureScope.NON_TRANSIENT
         return None, "UNKNOWN", FailureScope.NON_TRANSIENT
-
-    def _models_endpoint(self) -> str:
-        suffix = "/chat/completions"
-        if not self._config.endpoint.endswith(suffix):
-            raise ValueError("Configured Router endpoint must end with /chat/completions")
-        return f"{self._config.endpoint.removesuffix(suffix)}/models"

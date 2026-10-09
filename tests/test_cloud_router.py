@@ -12,9 +12,10 @@ from routers.http_router import RouterUnavailableError, StructuredHTTPRouter
 from schemas.models import RouterRequest
 
 
-def test_router_uses_backend_chat_schema_mode_and_parses_structured_decision(monkeypatch) -> None:
+def test_google_router_uses_schema_mode_reasoning_and_router_timeout(monkeypatch) -> None:
     captured: dict[str, object] = {}
     created = {"count": 0}
+    client_timeouts: list[float] = []
 
     class Response:
         def raise_for_status(self) -> None:
@@ -45,8 +46,9 @@ def test_router_uses_backend_chat_schema_mode_and_parses_structured_decision(mon
             captured.update(kwargs)
             return Response()
 
-    def client_factory(**_: object) -> Client:
+    def client_factory(**kwargs: object) -> Client:
         created["count"] += 1
+        client_timeouts.append(float(kwargs["timeout"]))
         return Client()
 
     monkeypatch.setattr("routers.http_router.httpx.AsyncClient", client_factory)
@@ -59,11 +61,12 @@ def test_router_uses_backend_chat_schema_mode_and_parses_structured_decision(mon
     )
 
     config = RouterBackendConfig(
-        backend="openrouter",
+        backend="google",
         endpoint="http://backend.invalid/chat/completions",
-        model="router",
+        model="gemini-3.8-flash",
         api_key="test-key",
         timeout=1,
+        reasoning_effort="low",
     )
     router = StructuredHTTPRouter(config, BackendCircuits())
 
@@ -75,12 +78,77 @@ def test_router_uses_backend_chat_schema_mode_and_parses_structured_decision(mon
     assert decision.task_group == "coding_reasoning"
     assert repeated_decision.task_group == "coding_reasoning"
     assert created["count"] == 1
+    assert client_timeouts == [1]
     assert captured["json"]["stream"] is False
     assert captured["json"]["temperature"] == 0
-    assert captured["json"]["max_tokens"] == 96
-    assert captured["json"]["reasoning"] == {"effort": "none"}
+    assert captured["json"]["max_tokens"] == 128
+    assert captured["json"]["reasoning_effort"] == "low"
     assert captured["json"]["response_format"]["type"] == "json_schema"
+    assert "chat_template_kwargs" not in captured["json"]
     assert captured["headers"]["Authorization"] == "Bearer test-key"
+
+
+def test_nvidia_nemotron_uses_json_mode_and_disables_thinking(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    client_timeouts: list[float] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "action": "ANSWER",
+                                    "task_group": "general",
+                                    "confidence": 0.9,
+                                    "reason": "general request",
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class Client:
+        async def post(self, _: str, **kwargs: object) -> Response:
+            captured.update(kwargs)
+            return Response()
+
+    def client_factory(**kwargs: object) -> Client:
+        client_timeouts.append(float(kwargs["timeout"]))
+        return Client()
+
+    monkeypatch.setattr("routers.http_router.httpx.AsyncClient", client_factory)
+    router = StructuredHTTPRouter(
+        RouterBackendConfig(
+            backend="nvidia",
+            endpoint="http://nvidia.invalid/chat/completions",
+            model="nvidia/nemotron-3.5-lightning-30b-a3b",
+            api_key="test-key",
+            timeout=10,
+            temperature=0,
+            max_tokens=128,
+            reasoning_effort="low",
+        ),
+        BackendCircuits(),
+    )
+
+    decision = asyncio.run(router.decide(_router_request()))
+
+    assert decision.task_group == "general"
+    assert client_timeouts == [10]
+    assert captured["json"]["model"] == "nvidia/nemotron-3.5-lightning-30b-a3b"
+    assert captured["json"]["temperature"] == 0
+    assert captured["json"]["max_tokens"] == 128
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in captured["json"]
+    assert "reasoning" not in captured["json"]
 
 
 def test_malformed_success_gets_exactly_one_repair_request(monkeypatch) -> None:

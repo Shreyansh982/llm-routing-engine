@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import json
+
 import streamlit as st
 
 from dashboard.utils.records import TECHNICAL_UNAVAILABLE
@@ -41,7 +43,11 @@ def request_status_card(status: str, action: str, latency_ms: float) -> None:
 
 def developer_table(rows: list[dict[str, Any]], developer_mode: bool, public_columns: list[str]) -> None:
     if developer_mode:
-        st.dataframe(rows, width="stretch", hide_index=True)
+        st.dataframe(
+            [{key: json.dumps(value) if isinstance(value, (dict, list)) else value
+              for key, value in row.items()} for row in rows],
+            width="stretch", hide_index=True,
+        )
         return
     st.dataframe(
         [{column: row.get(column) for column in public_columns} for row in rows],

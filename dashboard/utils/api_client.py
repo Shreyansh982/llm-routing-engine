@@ -9,6 +9,14 @@ from typing import Any
 import httpx
 
 
+def extract_diagnostics(payload: dict[str, Any]) -> dict[str, Any] | None:
+    data = payload.get("data")
+    diagnostic = data.get("diagnostics") if isinstance(data, dict) else None
+    if diagnostic is None:
+        diagnostic = payload.get("diagnostics")
+    return diagnostic if isinstance(diagnostic, dict) else None
+
+
 @dataclass(frozen=True)
 class ApiResult:
     status_code: int
@@ -24,9 +32,10 @@ class ApiResult:
 class RoutingEngineApiClient:
     """Small API client that never reaches into application internals or cloud providers."""
 
-    def __init__(self, base_url: str, timeout: float = 90.0) -> None:
+    def __init__(self, base_url: str, timeout: float = 90.0, developer_token: str | None = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._developer_token = developer_token
 
     def chat(
         self,
@@ -62,8 +71,8 @@ class RoutingEngineApiClient:
     def router_health(self, developer_mode: bool = False) -> ApiResult:
         return self._request("GET", "/router/health", developer_mode=developer_mode)
 
-    def provider_health(self) -> ApiResult:
-        return self._request("GET", "/providers/health")
+    def provider_health(self, developer_mode: bool = False) -> ApiResult:
+        return self._request("GET", "/providers/health", developer_mode=developer_mode)
 
     def policies(self, tenant_id: str) -> ApiResult:
         return self._request("GET", "/policies", api_version="v2", tenant_id=tenant_id)
@@ -89,6 +98,8 @@ class RoutingEngineApiClient:
         started = perf_counter()
         try:
             headers = {"X-Developer-Mode": "true"} if developer_mode else {}
+            if developer_mode and self._developer_token:
+                headers["X-Developer-Token"] = self._developer_token
             if tenant_id:
                 headers["X-Tenant-ID"] = tenant_id
             with httpx.Client(timeout=self._timeout) as client:

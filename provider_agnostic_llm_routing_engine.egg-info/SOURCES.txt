@@ -38,6 +38,7 @@ providers/__init__.py
 providers/adapter.py
 providers/circuit_breaker.py
 providers/dispatcher.py
+providers/model_catalog.py
 registry/__init__.py
 registry/model_registry.py
 routers/__init__.py
@@ -49,6 +50,7 @@ schemas/models.py
 state/__init__.py
 state/manager.py
 tests/test_api.py
+tests/test_audit_hardening.py
 tests/test_circuit_breaker.py
 tests/test_cloud_integration.py
 tests/test_cloud_router.py
@@ -57,8 +59,10 @@ tests/test_control_plane.py
 tests/test_dashboard_records.py
 tests/test_gateway_and_adapters.py
 tests/test_migration_routing.py
+tests/test_router_reliability.py
 tests/test_routing_engine.py
 tests/test_routing_evaluation.py
+tests/test_startup_model_verification.py
 tests/test_state_registry_validator.py
 validation/__init__.py
 validation/decision_validator.py

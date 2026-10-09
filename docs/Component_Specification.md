@@ -5,7 +5,7 @@
 | `api/main.py` | Dependency assembly, HTTP validation/presentation, errors, developer-mode gate. | No classification/fallback policy. |
 | `config/settings.py` | `.env` loading, backend/router validation, `PROVIDERS_JSON` parsing. | Router connection data never enters `RouterRequest`. |
 | `routing/engine.py` | State, V2 candidate resolution, router ladder, provider loop, gateway, diagnostics. | Failed candidate never becomes `last_provider`. |
-| `routers/http_router.py` | Strict structured chat-completions router transport. | Google primary, NVIDIA fallback; only malformed 2xx gets repair. |
+| `routers/http_router.py` | Provider-aware structured chat-completions transport with a per-tier timeout budget. | Google JSON schema, NVIDIA JSON object; only malformed 2xx gets one repair inside the same budget. |
 | `registry/model_registry.py` | 12 task records; filters/orders candidates. | V2 ordering stays inside selected group. |
 | `providers/dispatcher.py` | Circuit check/record and one task dispatch. | One adapter implementation maps to four backends. |
 | `providers/adapter.py` | Text/image payload conversion and safe upstream error classification. | No upstream body/credential propagation. |

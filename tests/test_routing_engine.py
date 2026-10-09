@@ -87,12 +87,13 @@ def test_retry_limit_and_pool_exhaustion_stop_without_another_router_call() -> N
 def test_router_retry_action_is_bounded_and_clarify_skips_provider_dispatch() -> None:
     retry = RouterDecision(action="RETRY", confidence=0.5, reason="retry")
     clarify = RouterDecision(action="CLARIFY", confidence=0.7, reason="Which language?")
-    primary = QueueRouter([retry, clarify])
+    primary = QueueRouter([decision(), retry, clarify])
     engine, state, _ = make_engine(primary, QueueRouter([]))
-    result = asyncio.run(engine.handle(ChatRequest(conversation_id="c1", message="initial")))
+    asyncio.run(engine.handle(ChatRequest(conversation_id="c1", message="initial")))
+    result = asyncio.run(engine.handle(ChatRequest(conversation_id="c1", message="initial", retry=True)))
 
-    assert result.action == RouterAction.CLARIFY and result.response == "Which language?"
-    assert state.load("c1").attempt_count == 1
+    assert result.action == RouterAction.CLARIFY and result.response == engine.CLARIFY_MESSAGE
+    assert state.load("c1").attempt_count == 2
 
 
 def test_provider_failure_becomes_controlled_engine_error() -> None:

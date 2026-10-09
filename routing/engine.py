@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -10,13 +11,15 @@ from uuid import uuid4
 
 from control_plane.models import CandidateSet, GovernancePolicy, PolicyAuditReference, PolicyDefinition, PolicyKind
 from control_plane.repository import PolicyAuditRepository
-from control_plane.services import CandidateSetResolver
+from control_plane.services import CandidateSetResolver, PolicyNotFoundError
 from core.interfaces import BaseRouter
 from gateway.response_gateway import ResponseGateway
 from providers.adapter import ProviderUnavailableError
 from providers.dispatcher import ProviderDisabledError, ProviderDispatcher
+from providers.model_catalog import StartupModelVerifier
 from registry.model_registry import ModelRegistry
 from schemas.models import (
+    failure_class,
     AvailableProvider,
     ChatRequest,
     ConversationState,
@@ -55,13 +58,25 @@ class GatewayExecutionError(RoutingEngineError):
     code = "GATEWAY_FAILURE"
 
 
+class DeadlineExceededError(RoutingEngineError):
+    code = "DEADLINE_EXCEEDED"
+
+
+class UnexpectedExecutionError(RoutingEngineError):
+    code = "INTERNAL_ERROR"
+
+
+class InvalidRoutingRequestError(RoutingEngineError):
+    code = "INVALID_REQUEST"
+
+
 class GovernanceDeniedError(RoutingEngineError):
     code = "GOVERNANCE_POLICY_DENIED"
 
 
 @dataclass
 class _DiagnosticsCapture:
-    request_id: str = field(default_factory=lambda: str(uuid4()))
+    request_id: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started: float = field(default_factory=time.perf_counter)
     router_used: str | None = None
@@ -80,12 +95,16 @@ class _DiagnosticsCapture:
     tenant: TenantContext | None = None
     candidate_set: CandidateSet | None = None
     policy_audit_recorded: bool = False
+    state: ConversationState | None = None
+    stage: FailureStage = FailureStage.REQUEST
+    deadline: float = 0.0
 
 
 class RoutingEngine:
     """Coordinates task classification, deterministic fallback, and response handling."""
 
     STOP_MESSAGE = "Unable to produce a better response."
+    CLARIFY_MESSAGE = "Could you clarify what you would like help with?"
 
     def __init__(
         self,
@@ -99,6 +118,8 @@ class RoutingEngine:
         max_attempts: int,
         candidate_resolver: CandidateSetResolver | None = None,
         policy_audit_repository: PolicyAuditRepository | None = None,
+        startup_model_verifier: StartupModelVerifier | None = None,
+        overall_request_timeout: float = 60.0,
     ) -> None:
         self._state = state_manager
         self._registry = registry
@@ -110,6 +131,8 @@ class RoutingEngine:
         self._max_attempts = max_attempts
         self._candidate_resolver = candidate_resolver
         self._policy_audit_repository = policy_audit_repository
+        self._startup_model_verifier = startup_model_verifier
+        self._overall_request_timeout = overall_request_timeout
 
     @property
     def registry(self) -> ModelRegistry:
@@ -127,13 +150,48 @@ class RoutingEngine:
         developer_mode: bool = False,
         tenant: TenantContext | None = None,
         routing_context: RoutingContext | None = None,
+        request_id: str | None = None,
+    ) -> RoutingResponse:
+        capture = _DiagnosticsCapture(request_id=request_id or str(uuid4()), tenant=tenant)
+        capture.deadline = asyncio.get_running_loop().time() + self._overall_request_timeout
+        try:
+            async with asyncio.timeout_at(capture.deadline):
+                return await self._handle(request, developer_mode, tenant, routing_context, capture)
+        except TimeoutError as exc:
+            raise DeadlineExceededError(
+                "Request deadline exceeded",
+                self._build_diagnostics(capture.state, capture, failure_level="deadline",
+                                        failure_stage=FailureStage.DEADLINE,
+                                        failure_reason="DEADLINE_EXCEEDED"),
+            ) from exc
+        except (RoutingEngineError, ConversationNotFoundError, PolicyNotFoundError):
+            raise
+        except Exception as exc:
+            logger.error("routing_unexpected_failure request_id=%s stage=%s", capture.request_id, capture.stage)
+            raise UnexpectedExecutionError(
+                "Unable to process request",
+                self._build_diagnostics(capture.state, capture, failure_level=capture.stage.value,
+                                        failure_stage=capture.stage, failure_reason="UNKNOWN"),
+            ) from exc
+
+    async def _handle(
+        self, request: ChatRequest, developer_mode: bool, tenant: TenantContext | None,
+        routing_context: RoutingContext | None, capture: _DiagnosticsCapture,
     ) -> RoutingResponse:
         started = time.perf_counter()
-        capture = _DiagnosticsCapture(tenant=tenant) if developer_mode or tenant is not None else None
         tenant_id = tenant.tenant_id if tenant is not None else "legacy"
         routing_context = routing_context or RoutingContext()
         if request.retry:
             state = self._state.load(request.conversation_id, tenant_id)
+            capture.state = state
+            if state.has_image and request.image is None:
+                raise InvalidRoutingRequestError(
+                    "Image retries require the image to be attached again",
+                    self._build_diagnostics(state, capture, failure_level="request",
+                                            failure_stage=FailureStage.REQUEST,
+                                            failure_reason="IMAGE_REQUIRED"),
+                )
+            state.has_image = request.image is not None
             if self._prepare_retry(state, tenant_id):
                 return self._attach_diagnostics(
                     self._stop_response(state.conversation_id), state, capture, developer_mode
@@ -145,10 +203,18 @@ class RoutingEngine:
                 state = self._state.create(
                     request.conversation_id, request.message, self._max_attempts, tenant_id
                 )
+            state.original_query = request.message
+            state.attempt_count = 0
+            state.excluded_providers = []
+            state.last_provider = None
+            state.has_image = request.image is not None
+            self._state.update(state, tenant_id)
 
+        capture.state = state
         result = await self._route(state, request, capture, tenant_id, routing_context)
         logger.info(
-            "routing_complete conversation_id=%s action=%s attempt_count=%s latency_ms=%.2f",
+            "routing_complete request_id=%s conversation_id=%s action=%s attempt_count=%s latency_ms=%.2f",
+            capture.request_id,
             state.conversation_id,
             result.action,
             state.attempt_count,
@@ -163,6 +229,10 @@ class RoutingEngine:
         return [{"id": provider.id, "enabled": provider.enabled} for provider in self._registry.list_providers()]
 
     async def router_health(self) -> dict[str, object]:
+        if self._startup_model_verifier is not None:
+            results = await self._startup_model_verifier.verify(role="router")
+            return {**{item.name: "healthy" if item.available else "unhealthy" for item in results},
+                    "backends": self._dispatcher.circuit_snapshot()}
         return {
             "primary_router": await self._primary.health(),
             "fallback_router": await self._fallback.health(),
@@ -170,12 +240,50 @@ class RoutingEngine:
         }
 
     async def provider_health(self) -> dict[str, object]:
+        if self._startup_model_verifier is not None:
+            results = await self._startup_model_verifier.verify(role="provider")
+            disabled = {provider.id for provider in self._registry.list_providers() if not provider.enabled}
+            return {"providers": {item.name: "offline" if item.name in disabled else "healthy" if item.available else "unhealthy" for item in results},
+                    "backends": self._dispatcher.circuit_snapshot()}
         return {
             "providers": await self._dispatcher.health(),
             "backends": self._dispatcher.circuit_snapshot(),
         }
 
     async def verify_startup(self) -> None:
+        if self._startup_model_verifier is not None:
+            results = await self._startup_model_verifier.verify()
+            backend_summaries = []
+            for backend in dict.fromkeys(result.backend for result in results):
+                backend_results = [result for result in results if result.backend == backend]
+                available = sum(result.available for result in backend_results)
+                backend_summaries.append(f"{backend}: {available}/{len(backend_results)} available")
+            router_results = [result for result in results if result.role == "router"]
+            logger.info(
+                "Provider model verification: %s; routers: %s/%s available",
+                "; ".join(backend_summaries),
+                sum(result.available for result in router_results),
+                len(router_results),
+            )
+            unavailable = [result for result in results if not result.available]
+            if unavailable:
+                details = []
+                for result in unavailable:
+                    status = (
+                        f", models_http_status={result.http_status}"
+                        if result.http_status is not None
+                        else ""
+                    )
+                    details.append(
+                        f"{result.name} [backend={result.backend}, "
+                        f"model={result.configured_model}, reason={result.reason}, "
+                        f"catalog_match={result.catalog_model or 'none'}{status}]"
+                    )
+                raise RoutingEngineError(
+                    "Configured models are unavailable: " + "; ".join(details)
+                )
+            return
+
         router_status = await self.router_health()
         provider_health = await self.provider_health()
         statuses = {
@@ -210,9 +318,12 @@ class RoutingEngine:
         tenant_id: str,
         routing_context: RoutingContext,
     ) -> RoutingResponse:
+        blocked_backends: set[str] = set()
         while True:
             if self._retry_guard_fired(state):
                 return self._stop_response(state.conversation_id)
+            if capture:
+                capture.stage = FailureStage.GOVERNANCE
             candidate_set = self._resolve_candidates(state.excluded_providers, capture, routing_context)
             allowed_ids = [provider.id for provider in candidate_set.providers]
             if not allowed_ids:
@@ -230,6 +341,7 @@ class RoutingEngine:
                 allowed_ids, requires_image=request.image is not None
             )
             router_request = RouterRequest(
+                retry=request.retry,
                 original_query=state.original_query,
                 latest_user_message=request.message,
                 previous_response=state.previous_response,
@@ -240,9 +352,10 @@ class RoutingEngine:
             )
             if capture:
                 capture.capabilities_considered = candidate_set.providers
-            decision, blocked_backends = await self._decision_from_ladder(
+            decision, router_blocked_backends = await self._decision_from_ladder(
                 router_request, state, capture
             )
+            blocked_backends.update(router_blocked_backends)
             if decision.action == RouterAction.RETRY:
                 if self._prepare_retry(state, tenant_id):
                     return self._stop_response(state.conversation_id)
@@ -251,13 +364,13 @@ class RoutingEngine:
                 return RoutingResponse(
                     conversation_id=state.conversation_id,
                     action=RouterAction.CLARIFY,
-                    response=decision.reason,
+                    response=self.CLARIFY_MESSAGE,
                 )
             if decision.action == RouterAction.STOP:
                 return RoutingResponse(
                     conversation_id=state.conversation_id,
                     action=RouterAction.STOP,
-                    response=decision.reason,
+                    response=self.STOP_MESSAGE,
                 )
             assert decision.task_group is not None
             if capture:
@@ -290,7 +403,9 @@ class RoutingEngine:
         last_error: Exception | None = None
         if capture and candidates:
             capture.initial_provider = candidates[0].id
-        for candidate in candidates:
+        for index, candidate in enumerate(candidates):
+            if capture and asyncio.get_running_loop().time() >= capture.deadline:
+                raise TimeoutError
             if candidate.backend in blocked_backends:
                 if capture:
                     capture.provider_attempts.append(
@@ -299,12 +414,33 @@ class RoutingEngine:
                             "backend": candidate.backend,
                             "model": candidate.model,
                             "outcome": "skipped_auth_failure",
+                            "failure_class": "AUTH",
+                            "upstream_status": None,
                         }
                     )
                 continue
             provider_started = time.perf_counter()
+            if capture:
+                capture.stage = FailureStage.DISPATCHER
             try:
                 provider_response = await self._dispatcher.dispatch(candidate.id, request)
+            except asyncio.CancelledError:
+                if capture:
+                    elapsed = (time.perf_counter() - provider_started) * 1000
+                    capture.provider_ms += elapsed
+                    capture.provider_attempts.append({
+                        "provider_id": candidate.id, "backend": candidate.backend,
+                        "model": candidate.model, "outcome": "cancelled",
+                        "failure_class": "DEADLINE_EXCEEDED" if asyncio.get_running_loop().time() >= capture.deadline else "CANCELLED",
+                        "upstream_status": None, "latency_ms": elapsed,
+                    })
+                    if asyncio.get_running_loop().time() >= capture.deadline:
+                        capture.provider_attempts.extend({
+                            "provider_id": pending.id, "backend": pending.backend,
+                            "model": pending.model, "outcome": "skipped_deadline",
+                            "failure_class": "DEADLINE_EXCEEDED", "upstream_status": None,
+                        } for pending in candidates[index + 1:])
+                raise
             except (ProviderUnavailableError, ProviderDisabledError) as exc:
                 last_error = exc
                 if getattr(exc, "blocks_backend", False):
@@ -320,11 +456,22 @@ class RoutingEngine:
                             "outcome": "failed",
                             "failure_reason": getattr(exc, "failure_reason", "UNKNOWN"),
                             "failure_scope": str(getattr(exc, "failure_scope", "non_transient")),
-                            "http_status": getattr(exc, "http_status", None),
+                            "upstream_status": getattr(exc, "http_status", None),
+                            "failure_class": failure_class(exc),
+                            "latency_ms": (time.perf_counter() - provider_started) * 1000,
                         }
                     )
                     capture.fallback_used = True
                 continue
+            except Exception:
+                if capture:
+                    capture.provider_attempts.append({
+                        "provider_id": candidate.id, "backend": candidate.backend,
+                        "model": candidate.model, "outcome": "failed",
+                        "failure_class": "UNKNOWN", "upstream_status": None,
+                        "latency_ms": (time.perf_counter() - provider_started) * 1000,
+                    })
+                raise
             if capture:
                 capture.provider_ms += (time.perf_counter() - provider_started) * 1000
                 capture.provider_attempts.append(
@@ -333,11 +480,16 @@ class RoutingEngine:
                         "backend": candidate.backend,
                         "model": candidate.model,
                         "outcome": "success",
+                        "upstream_status": None,
+                        "failure_class": None,
+                        "latency_ms": (time.perf_counter() - provider_started) * 1000,
                     }
                 )
                 capture.selected_provider = candidate.id
                 capture.fallback_used = capture.fallback_used or len(capture.provider_attempts) > 1
             try:
+                if capture:
+                    capture.stage = FailureStage.GATEWAY
                 gateway_started = time.perf_counter()
                 clean_response = self._gateway.process(provider_response)
                 if capture:
@@ -355,6 +507,8 @@ class RoutingEngine:
                         failure_reason="UNKNOWN",
                     ),
                 ) from exc
+            if capture and asyncio.get_running_loop().time() >= capture.deadline:
+                raise TimeoutError
             state.previous_response = clean_response.response
             state.last_provider = candidate.id
             self._state.update(state, tenant_id)
@@ -373,7 +527,7 @@ class RoutingEngine:
                 failure_level="provider",
                 failure_stage=FailureStage.PROVIDER,
                 failure_reason=failure_reason,
-                http_status=getattr(last_error, "http_status", None),
+                upstream_status=getattr(last_error, "http_status", None),
             ),
         )
 
@@ -388,12 +542,24 @@ class RoutingEngine:
             ("primary_router", self._primary),
             ("fallback_router", self._fallback),
         ):
+            if capture:
+                capture.stage = FailureStage.PRIMARY_ROUTER if router_name == "primary_router" else FailureStage.FALLBACK_ROUTER
             router_started = time.perf_counter()
             try:
                 raw_decision = await router.decide(request)
                 decision = self._validator.validate(
-                    raw_decision, request.available_task_groups, request.has_image
+                    raw_decision, request.available_task_groups, request.has_image, request.retry
                 )
+            except asyncio.CancelledError:
+                if capture:
+                    elapsed = (time.perf_counter() - router_started) * 1000
+                    capture.router_ms += elapsed
+                    capture.router_attempts.append({
+                        "router": router_name, "outcome": "cancelled", "latency_ms": elapsed,
+                        "upstream_status": None,
+                        "failure_class": "DEADLINE_EXCEEDED" if asyncio.get_running_loop().time() >= capture.deadline else "CANCELLED",
+                    })
+                raise
             except Exception as exc:
                 if getattr(exc, "blocks_backend", False) and getattr(exc, "backend", None):
                     blocked_backends.add(exc.backend)
@@ -405,11 +571,14 @@ class RoutingEngine:
                             "router": router_name,
                             "outcome": "failed",
                             "latency_ms": elapsed,
-                            "failure_reason": getattr(exc, "failure_reason", type(exc).__name__),
+                            "failure_reason": getattr(exc, "failure_reason", "INVALID_DECISION" if isinstance(exc, ValueError) else "UNKNOWN"),
+                            "failure_class": failure_class(exc),
+                            "upstream_status": getattr(exc, "http_status", None),
                         }
                     )
                     capture.fallback_used = True
-                logger.warning("router_tier_failed tier=%s error=%s", router_name, type(exc).__name__)
+                logger.warning("router_tier_failed request_id=%s tier=%s error=%s",
+                               capture.request_id if capture else None, router_name, type(exc).__name__)
                 continue
             elapsed = (time.perf_counter() - router_started) * 1000
             if capture:
@@ -417,7 +586,8 @@ class RoutingEngine:
                 capture.router_used = router_name
                 capture.routing_reason = decision.reason
                 capture.router_attempts.append(
-                    {"router": router_name, "outcome": "success", "latency_ms": elapsed}
+                    {"router": router_name, "outcome": "success", "latency_ms": elapsed,
+                     "upstream_status": None, "failure_class": None}
                 )
             return decision, blocked_backends
         raise RoutingEngineError(
@@ -496,12 +666,12 @@ class RoutingEngine:
 
     def _build_diagnostics(
         self,
-        state: ConversationState,
+        state: ConversationState | None,
         capture: _DiagnosticsCapture | None,
         failure_level: str | None = None,
         failure_stage: FailureStage = FailureStage.NONE,
         failure_reason: str = "NONE",
-        http_status: int | None = None,
+        upstream_status: int | None = None,
     ) -> RoutingDiagnostics | None:
         if capture is None:
             return None
@@ -510,6 +680,15 @@ class RoutingEngine:
             provider = self._registry.get_provider(capture.selected_provider)
             backend, model = provider.backend, provider.model
         candidate_set = capture.candidate_set
+        if upstream_status is None:
+            upstream_status = next((attempt["upstream_status"] for attempt in reversed(
+                capture.router_attempts + capture.provider_attempts
+            ) if attempt.get("upstream_status") is not None), None)
+        terminal_class = None
+        if failure_reason != "NONE":
+            terminal_class = next((attempt["failure_class"] for attempt in reversed(
+                capture.router_attempts + capture.provider_attempts
+            ) if attempt.get("failure_class") is not None), "UNKNOWN")
         return RoutingDiagnostics(
             developer_mode=True,
             request_id=capture.request_id,
@@ -533,14 +712,18 @@ class RoutingEngine:
             circuit_state=self._dispatcher.circuit_snapshot(),
             capabilities_considered=capture.capabilities_considered,
             fallback_used=capture.fallback_used,
-            retry_count=state.attempt_count,
+            router_fallback_used=any(item["router"] == "fallback_router" for item in capture.router_attempts),
+            provider_fallback_used=len(capture.provider_attempts) > 1,
+            retry_count=state.attempt_count if state else 0,
             latency_breakdown=LatencyBreakdown(
                 router_ms=capture.router_ms,
                 provider_ms=capture.provider_ms,
                 gateway_ms=capture.gateway_ms,
                 total_ms=(time.perf_counter() - capture.started) * 1000,
             ),
-            http_status=http_status,
+            upstream_status=upstream_status,
+            upstream_http_status=upstream_status,
+            failure_class="DEADLINE_EXCEEDED" if failure_reason == "DEADLINE_EXCEEDED" else terminal_class,
             failure_stage=failure_stage,
             failure_reason=failure_reason,
             failure_level=failure_level,

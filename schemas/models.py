@@ -40,6 +40,8 @@ class FailureStage(StrEnum):
     """The architecture boundary at which a request terminally failed."""
 
     NONE = "none"
+    REQUEST = "request"
+    DEADLINE = "deadline"
     PRIMARY_ROUTER = "primary_router"
     FALLBACK_ROUTER = "fallback_router"
     DISPATCHER = "dispatcher"
@@ -64,6 +66,21 @@ def http_failure_reason(status_code: int) -> str:
         504: "GATEWAY_TIMEOUT",
     }
     return f"HTTP_{status_code}_{phrases.get(status_code, 'ERROR')}"
+
+
+def failure_class(error: Exception) -> str:
+    status = getattr(error, "http_status", None)
+    if status in {401, 403}:
+        return "AUTH"
+    if status == 429:
+        return "HTTP_429"
+    if status is not None and status >= 500:
+        return "HTTP_5XX"
+    if status == 404 or getattr(error, "failure_scope", None) == FailureScope.MODEL_SPECIFIC:
+        return "MODEL_UNAVAILABLE"
+    if status is not None and status >= 400:
+        return "HTTP_4XX"
+    return getattr(error, "failure_reason", "UNKNOWN")
 
 
 class ProviderCapability(BaseModel):
@@ -111,6 +128,7 @@ class AvailableProvider(BaseModel):
 
 
 class RouterRequest(BaseModel):
+    retry: bool = False
     original_query: str = Field(min_length=1)
     latest_user_message: str = Field(min_length=1)
     previous_response: str | None = None
@@ -141,13 +159,35 @@ class ImageInput(BaseModel):
     media_type: Literal["image/jpeg", "image/png", "image/webp"]
     data_base64: str = Field(min_length=1)
 
-    @field_validator("data_base64")
+    @model_validator(mode="before")
     @classmethod
-    def valid_base64(cls, value: str) -> str:
+    def valid_image(cls, value: Any) -> Any:
+        from config.settings import get_settings
+
+        if not isinstance(value, dict) or not isinstance(value.get("data_base64"), str):
+            return value
+        encoded = value["data_base64"]
+        media_type = value.get("media_type")
+        limit = get_settings().max_image_bytes
+        if len(encoded) > 4 * ((limit + 2) // 3):
+            raise ValueError("image exceeds the configured size limit")
         try:
-            base64.b64decode(value, validate=True)
+            decoded = base64.b64decode(encoded, validate=True)
         except (binascii.Error, ValueError) as exc:
             raise ValueError("must contain valid base64") from exc
+        if len(decoded) > limit:
+            raise ValueError("image exceeds the configured size limit")
+        valid = (
+            media_type == "image/png" and decoded.startswith(b"\x89PNG\r\n\x1a\n")
+            and len(decoded) >= 33 and decoded[12:16] == b"IHDR"
+            or media_type == "image/jpeg" and decoded.startswith(b"\xff\xd8\xff")
+            and decoded.endswith(b"\xff\xd9")
+            or media_type == "image/webp" and len(decoded) >= 20
+            and decoded[:4] == b"RIFF" and decoded[8:12] == b"WEBP"
+            and decoded[12:16] in {b"VP8 ", b"VP8L", b"VP8X"}
+        )
+        if not valid:
+            raise ValueError("image content does not match its media type")
         return value
 
 
@@ -161,6 +201,7 @@ class ProviderResponse(BaseModel):
 
 
 class ConversationState(BaseModel):
+    has_image: bool = False
     conversation_id: str = Field(min_length=1)
     original_query: str = Field(min_length=1)
     previous_response: str | None = None
@@ -248,12 +289,16 @@ class RoutingDiagnostics(BaseModel):
     circuit_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
     capabilities_considered: list[AvailableProvider] = Field(default_factory=list)
     fallback_used: bool = False
+    router_fallback_used: bool = False
+    provider_fallback_used: bool = False
     retry_count: int = Field(ge=0)
     latency_breakdown: LatencyBreakdown
     http_status: int | None = None
     # The public API may intentionally use a controlled status (for example 503).
     # This field preserves the status returned by the provider backend itself.
     upstream_http_status: int | None = None
+    upstream_status: int | None = None
+    failure_class: str | None = None
     failure_stage: FailureStage = FailureStage.NONE
     # A completed answer has no failure. UNKNOWN is reserved for an actual failure
     # whose cause could not be classified.

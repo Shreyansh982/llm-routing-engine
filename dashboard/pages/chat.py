@@ -7,7 +7,7 @@ import base64
 import streamlit as st
 
 from dashboard.components.common import status_badge
-from dashboard.utils.api_client import RoutingEngineApiClient
+from dashboard.utils.api_client import RoutingEngineApiClient, extract_diagnostics
 from dashboard.utils.records import new_record
 from dashboard.utils.state import (
     append_message,
@@ -84,12 +84,11 @@ def _send(
             developer_mode=st.session_state.developer_mode,
             image=image,
         )
-        conversation = client.conversation(conversation_id) if result.succeeded else None
 
     data = result.payload.get("data", {}) if result.succeeded else {}
     response = data.get("response") if isinstance(data, dict) else None
     action = data.get("action") if isinstance(data, dict) else None
-    diagnostics = data.get("diagnostics") if isinstance(data, dict) else result.payload.get("diagnostics")
+    diagnostics = extract_diagnostics(result.payload)
     if not isinstance(response, str):
         response = (
             _failure_message(diagnostics)
@@ -98,11 +97,6 @@ def _send(
         )
     append_message(conversation_id, "assistant", response)
 
-    retry_count = None
-    if conversation and conversation.succeeded:
-        state = conversation.payload.get("data", {})
-        if isinstance(state, dict) and isinstance(state.get("attempt_count"), int):
-            retry_count = state["attempt_count"]
     record = new_record(
         timestamp=timestamp(),
         conversation_id=conversation_id,
@@ -111,7 +105,7 @@ def _send(
         status="success" if result.succeeded else "failure",
         action=action if isinstance(action, str) else None,
         latency_ms=result.elapsed_ms,
-        retry_count=retry_count,
+        retry_count=None,
         http_status=result.status_code,
         error=result.error,
         diagnostics=diagnostics if isinstance(diagnostics, dict) else None,
@@ -131,6 +125,6 @@ def _send(
 def _failure_message(diagnostics: dict[str, object]) -> str:
     stage = diagnostics.get("failure_stage", "unknown")
     reason = diagnostics.get("failure_reason", "UNKNOWN")
-    upstream_status = diagnostics.get("upstream_http_status", diagnostics.get("http_status"))
+    upstream_status = diagnostics.get("upstream_status", diagnostics.get("upstream_http_status"))
     suffix = f" (upstream HTTP {upstream_status})" if upstream_status is not None else ""
     return f"{stage} failure: {reason}{suffix}"

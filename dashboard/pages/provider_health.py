@@ -55,7 +55,7 @@ def _refresh(client: RoutingEngineApiClient) -> dict[str, object]:
     started = perf_counter()
     developer_mode = st.session_state.developer_mode
     router_result = client.router_health(developer_mode=developer_mode)
-    provider_result = client.provider_health()
+    provider_result = client.provider_health(developer_mode=st.session_state.developer_mode)
     list_result = client.providers(developer_mode=developer_mode)
     elapsed_ms = (perf_counter() - started) * 1000
     routers: list[dict[str, object]] = []

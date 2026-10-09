@@ -11,7 +11,7 @@ from providers.adapter import ProviderUnavailableError
 from routers.http_router import RouterUnavailableError
 from routing.engine import ProviderExecutionError, RoutingEngineError
 from schemas.models import ChatRequest, FailureScope, ImageInput, TaskGroup
-from tests.conftest import FakeProvider, QueueRouter, decision, make_engine, provider
+from tests.conftest import PNG_BASE64, FakeProvider, QueueRouter, decision, make_engine, provider
 
 
 def group_providers(group: TaskGroup, count: int, backends: list[str] | None = None):
@@ -48,7 +48,7 @@ def test_each_task_chain_falls_through_in_priority_order(group: TaskGroup, count
     request = ChatRequest(conversation_id="chain", message="work")
     if group == TaskGroup.MULTIMODAL:
         request = request.model_copy(
-            update={"image": ImageInput(media_type="image/jpeg", data_base64=base64.b64encode(b"image").decode())}
+            update={"image": ImageInput(media_type="image/png", data_base64=PNG_BASE64)}
         )
 
     result = asyncio.run(engine.handle(request, developer_mode=True))
@@ -69,7 +69,7 @@ def test_task_chain_exhaustion_is_controlled(group: TaskGroup, count: int) -> No
     request = ChatRequest(conversation_id="exhaust", message="work")
     if group == TaskGroup.MULTIMODAL:
         request = request.model_copy(
-            update={"image": ImageInput(media_type="image/png", data_base64=base64.b64encode(b"image").decode())}
+            update={"image": ImageInput(media_type="image/png", data_base64=PNG_BASE64)}
         )
     with pytest.raises(ProviderExecutionError):
         asyncio.run(engine.handle(request))
@@ -142,13 +142,13 @@ def test_image_request_is_structured_and_never_stored_in_conversation() -> None:
     engine, state, _ = make_engine(
         QueueRouter([decision(TaskGroup.MULTIMODAL)]), QueueRouter([]), providers
     )
-    encoded = base64.b64encode(b"private-image").decode()
+    encoded = PNG_BASE64
     result = asyncio.run(
         engine.handle(
             ChatRequest(
                 conversation_id="image",
                 message="describe",
-                image={"media_type": "image/webp", "data_base64": encoded},
+                image={"media_type": "image/png", "data_base64": encoded},
             )
         )
     )
@@ -191,7 +191,7 @@ def test_image_cannot_be_classified_as_text_only_group() -> None:
                 ChatRequest(
                     conversation_id="bad-image-group",
                     message="describe",
-                    image={"media_type": "image/png", "data_base64": "aW1hZ2U="},
+                    image={"media_type": "image/png", "data_base64": PNG_BASE64},
                 )
             )
         )

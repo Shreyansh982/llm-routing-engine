@@ -11,7 +11,7 @@ from schemas.models import InputModality, TaskGroup
 
 EXPECTED = {
     "g1_google_flash_lite": ("general", "google", "gemini-3.5-flash-lite", 1),
-    "g2_openrouter_qwen": ("general", "openrouter", "qwen/qwen3.8-27b:free", 2),
+    "g2_openrouter_qwen": ("general", "openrouter", "qwen/qwen3.8-27b", 2),
     "g3_groq_oss20b": ("general", "groq", "openai/gpt-oss-20b", 3),
     "g4_nvidia_deepseek": ("general", "nvidia", "deepseek-ai/deepseek-v4.1-flash", 4),
     "c1_groq_oss120b": ("coding_reasoning", "groq", "openai/gpt-oss-120b", 1),
@@ -58,7 +58,9 @@ def settings_for(providers: list[dict[str, object]]) -> Settings:
         primary_router_backend="google",
         primary_router_model="gemini-3.8-flash",
         fallback_router_backend="nvidia",
-        fallback_router_model="z-ai/glm-5-3-flash",
+        fallback_router_model="nvidia/nemotron-3.5-lightning-30b-a3b",
+        request_timeout=20,
+        router_timeout=10,
         providers_json=json.dumps(providers),
     )
 
@@ -81,7 +83,12 @@ def test_env_example_contains_exact_router_and_task_model_topology() -> None:
     assert settings.primary_router_config().backend == "google"
     assert settings.primary_router_config().model == "gemini-3.8-flash"
     assert settings.fallback_router_config().backend == "nvidia"
-    assert settings.fallback_router_config().model == "z-ai/glm-5-3-flash"
+    assert settings.fallback_router_config().model == "nvidia/nemotron-3.5-lightning-30b-a3b"
+    assert settings.primary_router_config().timeout == 10
+    assert settings.fallback_router_config().timeout == 10
+    assert all(provider.timeout == 20 for provider in providers)
+    assert settings.overall_request_timeout == 60
+    assert settings.request_timeout < settings.overall_request_timeout
     assert len(providers) == 12
     assert len({provider.id for provider in providers}) == 12
     assert {
@@ -145,3 +152,30 @@ def test_malformed_provider_json_fails_cleanly() -> None:
     settings = settings_for(valid_minimal_topology()).model_copy(update={"providers_json": "not-json"})
     with pytest.raises(ValueError, match="PROVIDERS_JSON"):
         settings.provider_configs()
+
+
+def test_router_and_task_provider_timeouts_are_independent() -> None:
+    settings = settings_for(valid_minimal_topology()).model_copy(
+        update={"request_timeout": 47, "router_timeout": 2}
+    )
+
+    assert settings.primary_router_config().timeout == 2
+    assert settings.fallback_router_config().timeout == 2
+    assert all(provider.timeout == 47 for provider in settings.provider_configs())
+
+    changed = settings.model_copy(update={"request_timeout": 31, "router_timeout": 7})
+    assert changed.primary_router_config().timeout == 7
+    assert all(provider.timeout == 31 for provider in changed.provider_configs())
+
+
+def test_default_provider_budget_leaves_time_for_fallback(monkeypatch) -> None:
+    from api.main import build_engine
+
+    monkeypatch.delenv("REQUEST_TIMEOUT", raising=False)
+    monkeypatch.delenv("OVERALL_REQUEST_TIMEOUT", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.request_timeout == 20
+    assert settings.overall_request_timeout == 60
+    engine = build_engine(settings)
+    assert engine._overall_request_timeout == 60
+    assert all(config.timeout == 20 for config in engine.registry.list_providers())

@@ -12,17 +12,40 @@ class ResponseGateway:
         self._identity_terms = [term for term in (identity_terms or []) if term]
 
     def process(self, response: ProviderResponse) -> ProviderResponse:
-        text = response.response.strip()
-        for term in self._identity_terms:
-            escaped = re.escape(term)
-            text = re.sub(rf"\b[Aa]s\s+{escaped}\s*,?\s*", "", text, flags=re.IGNORECASE)
-            text = re.sub(
-                rf"\b[Ii]\s+am\s+{escaped}\b", "I am an AI assistant", text, flags=re.IGNORECASE
-            )
-            text = re.sub(escaped, "AI assistant", text, flags=re.IGNORECASE)
-        # Strip obvious internal metadata labels without attempting impossible perfect masking.
-        text = re.sub(r"(?im)^\s*(provider|model|endpoint|api[_ -]?key|routing)\s*:\s*.*$", "", text)
-        text = re.sub(r"(?m)^[ \t]+", "", text)
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        return ProviderResponse(response=text)
+        introduction = (
+            r"((?:^ {0,3}(?:[-*+] |\d+[.)] |#{1,6} )?|(?<=[.!?])[ \t]+)"
+            r"(?:(?:Hello|Hi|Hey)[,!]?[ \t]+)?(?:\*\*|__)?)"
+        )
+        identity_end = r"(?=[ \t]*(?:[.!?;,]|and[ \t]+I\b|(?:\*\*|__)?[ \t]*$))"
+        assistant_description = r"an?[ \t]+(?:AI(?:[ \t]+(?:assistant|model))?|(?:large[ \t]+)?language[ \t]+model|assistant)"
+        origin = r"(?:trained|developed|created)[ \t]+by[ \t]+"
+        lines = []
+        fence = None
+        for line in response.response.splitlines(keepends=True):
+            marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+            if fence is not None:
+                lines.append(line)
+                if re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*\r?\n?", line):
+                    fence = None
+                continue
+            if marker:
+                fence = marker.group(1)
+                lines.append(line)
+                continue
+            if not line.startswith(("    ", "\t")):
+                for term in sorted(self._identity_terms, key=len, reverse=True):
+                    name = re.escape(term) + r"(?:-V\d+(?:\.\d+)*)?(?![\w-])"
+                    line = re.sub(
+                        rf"{introduction}I(?:[ \t]+(?:am|was)|['’]m)[ \t]+(?:{assistant_description}[ \t]+)?{origin}{name}{identity_end}",
+                        r"\1I am an AI assistant", line, flags=re.IGNORECASE,
+                    )
+                    line = re.sub(
+                        rf"{introduction}(?:I[ \t]+am|I'm|I’m|My[ \t]+name[ \t]+is)[ \t]+{name}{identity_end}",
+                        r"\1I am an AI assistant", line, flags=re.IGNORECASE,
+                    )
+                    line = re.sub(
+                        rf"{introduction}As[ \t]+(?:{assistant_description}[ \t]+{origin})?{name},(?=[ \t]+(?:I\b|my\b))",
+                        r"\1As an AI assistant,", line, flags=re.IGNORECASE,
+                    )
+            lines.append(line)
+        return ProviderResponse(response="".join(lines))

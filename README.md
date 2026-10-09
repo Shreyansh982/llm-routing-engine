@@ -58,7 +58,7 @@ Google primary router ---- failure/invalid decision ----> NVIDIA fallback router
                    Response gateway -> API response / diagnostics
 ```
 
-FastAPI validates requests and presents versioned contracts. `RoutingEngine` owns state, router failover, registry-candidate selection, and the sequential provider loop. `ModelRegistry` owns task-model metadata and priority. `ProviderDispatcher` owns circuit checks and dispatches through one shared OpenAI-compatible adapter implementation for four backend mappings. The response gateway normalizes successful text and masks configured identity terms. The Streamlit dashboard calls FastAPI only.
+FastAPI validates requests and presents versioned contracts. `RoutingEngine` owns state, router failover, registry-candidate selection, and the sequential provider loop. `ModelRegistry` owns task-model metadata and priority. `ProviderDispatcher` owns circuit checks and dispatches through one shared OpenAI-compatible adapter implementation for four backend mappings. The response gateway scrubs configured assistant self-identification patterns while preserving code, formatting, and legitimate model references. The Streamlit dashboard calls FastAPI only.
 
 ### Task groups
 
@@ -75,14 +75,14 @@ The router receives request text, image presence, conversation retry context, an
 
 There are 14 active model configurations: two routers and 12 task models. The exact source is [`.env.example`](.env.example).
 
-**Routers:** primary `google / gemini-3.8-flash`; fallback `nvidia / z-ai/glm-5-3-flash`.
+**Routers:** primary `google / gemini-3.8-flash`; fallback `nvidia / nvidia/nemotron-3.5-lightning-30b-a3b`.
 
 | ID | Group | Role | Backend | Model | Priority | Input | Output |
 |---|---|---|---|---|---:|---|---|
 | `primary_router` | — | primary router | Google | `gemini-3.8-flash` | — | router request | structured decision |
-| `fallback_router` | — | fallback router | NVIDIA | `z-ai/glm-5-3-flash` | — | router request | structured decision |
+| `fallback_router` | — | fallback router | NVIDIA | `nvidia/nemotron-3.5-lightning-30b-a3b` | — | router request | structured decision |
 | `g1_google_flash_lite` | general | task candidate | Google | `gemini-3.5-flash-lite` | 1 | text | text |
-| `g2_openrouter_qwen` | general | task candidate | OpenRouter | `qwen/qwen3.8-27b:free` | 2 | text | text |
+| `g2_openrouter_qwen` | general | task candidate | OpenRouter | `qwen/qwen3.8-27b` | 2 | text | text |
 | `g3_groq_oss20b` | general | task candidate | Groq | `openai/gpt-oss-20b` | 3 | text | text |
 | `g4_nvidia_deepseek` | general | task candidate | NVIDIA | `deepseek-ai/deepseek-v4.1-flash` | 4 | text | text |
 | `c1_groq_oss120b` | coding_reasoning | task candidate | Groq | `openai/gpt-oss-120b` | 1 | text | text |
@@ -114,9 +114,13 @@ Priority defines V1 order. For V2, governance removes ineligible candidates firs
 
 All four use cloud endpoints and operator-supplied keys. The repository does not model quota remaining, cost, or a provider promise of unrestricted free access.
 
+`g2_openrouter_qwen` now uses OpenRouter's paid `qwen/qwen3.8-27b` slug. The provider catalog omits the former `:free` variant and its chat API explicitly rejects that variant as unavailable, so operators should review current OpenRouter pricing and quota before sending traffic.
+
 ## Routing, fallback, and circuits
 
-The Google router gets one structured request. A transport failure is not retried against it; the engine tries the NVIDIA fallback router. A 2xx response with malformed JSON/schema gets at most one bounded repair request. If both router tiers fail, FastAPI returns `503 ROUTER_FAILURE`.
+The Google router gets one structured request. A transport or HTTP failure is not retried against it; the engine immediately tries the NVIDIA Nemotron fallback. A 2xx response with malformed JSON/schema gets at most one repair request. The initial request and possible repair share one `ROUTER_TIMEOUT` budget (10 seconds by default) per tier, so the two-tier ladder is bounded to roughly 20 seconds plus local handoff overhead. If both tiers fail, FastAPI returns `503 ROUTER_FAILURE`.
+
+Router payloads follow each provider's supported contract. Google uses strict JSON-schema output with `reasoning_effort=low`; NVIDIA Nemotron uses JSON-object output with thinking disabled. Both use temperature `0` and a 128-token output cap.
 
 For `ANSWER`, the registry filters enabled, eligible, modality-compatible candidates and invokes them in order. A task candidate gets one attempt; the engine advances after failure and returns `503 PROVIDER_UNAVAILABLE` only after the selected group is exhausted. Explicit `retry: true` is separate: it excludes the prior successful provider and increments the conversation attempt count up to `MAX_RETRIES` (default `3`). This avoids retry multiplication across layers.
 
@@ -128,7 +132,9 @@ CLOSED -- 3 qualifying consecutive failures --> OPEN -- 30 seconds --> HALF_OPEN
   +---------------------------- successful probe ---------------------+
 ```
 
-Defaults are threshold `3`, open duration `30` seconds, and `1` half-open probe. HTTP 429/500/502/503/504 (unless model-specific), timeouts, and network errors are transient. Authentication/authorization, malformed responses, unsupported format, and model-specific failures do not open a circuit. A 401/403 blocks its backend only for the current request. Circuit state resets on process restart; health reads only report it.
+Defaults are threshold `3`, open duration `30` seconds, and `1` half-open probe. HTTP 5xx (unless model-specific), timeouts, and network errors are backend transient failures. A 429 is scoped to the attempted model: quota exhaustion alone does not prove a backend outage. The next eligible model remains available. Authentication/authorization, malformed responses, unsupported format, and model-specific failures do not open a circuit. A 401/403 blocks its backend only for the current request. Cancelled or unexpectedly failed half-open probes release their slot; probe timeouts reopen the circuit. Circuit state resets on process restart; authorized developer health reads only report it.
+
+The engine enforces `OVERALL_REQUEST_TIMEOUT` across routing and provider fallback, returning 504 when exhausted. Each provider attempt also has an async timeout. Router `RETRY` is accepted only on explicit retry requests and consumes the same turn budget; new messages reset retry state and update `original_query`. Catalog health checks fetch once per backend per operation and indicate catalog presence, not guaranteed successful inference.
 
 ## Images and multimodal requests
 
@@ -145,13 +151,18 @@ Settings load from `.env`; begin by copying `.env.example`. Keep keys out of ver
 | `GOOGLE_API_KEY`, `NVIDIA_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY` | yes | backend bearer credentials | `your_key_here` |
 | `GOOGLE_ENDPOINT`, `NVIDIA_ENDPOINT`, `OPENROUTER_ENDPOINT`, `GROQ_ENDPOINT` | yes | backend chat-completions URLs | values in `.env.example` |
 | `PRIMARY_ROUTER_BACKEND` / `PRIMARY_ROUTER_MODEL` | yes | primary classifier | `google` / `gemini-3.8-flash` |
-| `FALLBACK_ROUTER_BACKEND` / `FALLBACK_ROUTER_MODEL` | yes | fallback classifier | `nvidia` / `z-ai/glm-5-3-flash` |
+| `FALLBACK_ROUTER_BACKEND` / `FALLBACK_ROUTER_MODEL` | yes | fallback classifier | `nvidia` / `nvidia/nemotron-3.5-lightning-30b-a3b` |
 | `PROVIDERS_JSON` | yes | 12 task-model registry records | provided JSON array |
 | `MAX_RETRIES` | no | maximum explicit conversation retries | `3` |
-| `REQUEST_TIMEOUT` | no | upstream timeout in seconds | `60` |
+| `REQUEST_TIMEOUT` | no | timeout for each task-model attempt, in seconds | `20` |
+| `OVERALL_REQUEST_TIMEOUT` | no | total engine deadline, in seconds | `60` |
+| `MAX_IMAGE_BYTES` | no | maximum decoded image size | `5242880` |
+| `DEVELOPER_MODE_ENABLED` | no | operator opt-in for diagnostics | `false` |
+| `DEVELOPER_TOKEN` | no | optional token required via `X-Developer-Token` | unset |
+| `ROUTER_TIMEOUT` | no | whole-request budget for each router tier, including repair | `10` |
 | `ROUTER_TEMPERATURE` | no | router temperature | `0` |
 | `ROUTER_MAX_TOKENS` | no | router output cap | `128` |
-| `ROUTER_REASONING_EFFORT` | no | optional router reasoning setting | blank |
+| `ROUTER_REASONING_EFFORT` | no | Google router reasoning setting; omitted from NVIDIA | `low` |
 | `CIRCUIT_FAILURE_THRESHOLD` | no | failures before open | `3` |
 | `CIRCUIT_OPEN_SECONDS` | no | circuit cooldown | `30` |
 | `CIRCUIT_HALF_OPEN_PROBES` | no | recovery probes | `1` |
@@ -183,12 +194,12 @@ curl -X POST http://127.0.0.1:8000/api/v1/chat -H "Content-Type: application/jso
 
 ## Current project snapshot
 
-Verified from `.env.example`, route decorators, source layout, and `pytest --collect-only` on 2026-10-05:
+Verified from `.env.example`, route decorators, source layout, and `pytest --collect-only` on 2026-10-06:
 
 - 14 active model configurations: 2 routers and 12 task models.
 - 4 task groups, 4 provider backends, and 4 task fallback chains.
 - 14 API endpoints; 1 shared adapter implementation mapped to 4 backends.
-- 12 test files; 83 collected tests; 82 passed and 1 cloud test skipped in the default run.
+- 14 test files; test counts are recorded in [Testing strategy](docs/Testing_Strategy.md).
 - 9 Markdown documentation files (root README plus 8 under `docs/`).
 - 3 image formats, 1 image maximum, threshold 3, 30-second cooldown, and 1 half-open probe.
 
@@ -196,7 +207,7 @@ Verified from `.env.example`, route decorators, source layout, and `pytest --col
 
 The dashboard provides session-local records: total/success/failure counts, average/median request latency, retry and fallback rate when diagnostics exist, trends, and developer-mode provider/router distributions. It exports session records as CSV/JSON. It does not persist metrics or establish a scientific provider benchmark.
 
-The local routing-evaluation test uses a deterministic fake router and 15 prompts; it checks at least 80% capability-strength matching. That is a regression check, not a real-model quality/latency claim. The default suite above reported 92% coverage.
+The local routing-evaluation test uses a deterministic fake router and 15 prompts; it checks at least 80% capability-strength matching. That is a regression check, not a real-model quality/latency claim. The default suite above reported 93% coverage.
 
 Implemented now: V1/V2 contracts, two-tier structured routers, four groups, 12 task candidates, four backends, sequential fallback, shared circuits, opt-in diagnostics, image input, V2 policy/governance, and an API-only dashboard.
 

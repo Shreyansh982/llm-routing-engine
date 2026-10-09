@@ -4,9 +4,9 @@ Provider-Agnostic LLM Routing Engine is a proof of concept that separates LLM ta
 
 ## Current status
 
-The implementation has two structured-output routers, 12 task models across Google, NVIDIA, OpenRouter, and Groq, four task groups, V1/V2 APIs, backend-level circuits, optional single-image requests, and a Streamlit dashboard that consumes FastAPI only. V1 uses registry priority. V2 adds tenant policy and governance filtering/ranking without handing model mappings to the router.
+The implementation has a Google `gemini-3.8-flash` primary router and NVIDIA `nemotron-3.5-lightning-30b-a3b` fallback, plus 12 task models across Google, NVIDIA, OpenRouter, and Groq, four task groups, V1/V2 APIs, backend-level circuits, optional single-image requests, and a Streamlit dashboard that consumes FastAPI only. Each router tier has its own bounded timeout budget, separate from task-provider timeouts and conversation retries. V1 uses registry priority. V2 adds tenant policy and governance filtering/ranking without handing model mappings to the router.
 
-Its key boundaries are: **router** (action/group only), **registry** (private configured model metadata), **execution** (one-call-per-candidate fallback), **circuit** (shared backend health), and **gateway** (successful output normalization/masking).
+Its key boundaries are: **router** (action/group only), **registry** (private configured model metadata), **execution** (one-call-per-candidate fallback), **circuit** (shared backend health), and **gateway** (targeted assistant self-identification scrubbing with answer formatting preserved).
 
 ## Terms
 

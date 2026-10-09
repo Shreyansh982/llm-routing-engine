@@ -17,6 +17,7 @@ class DecisionValidator:
         decision: RouterDecision | dict[str, object],
         available_task_groups: list[TaskGroup],
         has_image: bool,
+        retry: bool = False,
     ) -> RouterDecision:
         try:
             parsed = (
@@ -25,6 +26,8 @@ class DecisionValidator:
         except ValidationError as exc:
             raise InvalidDecisionError("Router decision does not match the required schema") from exc
 
+        if parsed.action == RouterAction.RETRY and not retry:
+            raise InvalidDecisionError("RETRY requires an explicit retry invocation")
         if parsed.action == RouterAction.ANSWER:
             assert parsed.task_group is not None
             if parsed.task_group not in available_task_groups:

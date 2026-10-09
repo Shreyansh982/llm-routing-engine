@@ -27,13 +27,13 @@ The registry filters candidates by enabled state, V2 eligibility, group, modalit
 
 ```text
 Google `gemini-3.8-flash` primary router
-  -> failure / invalid decision -> NVIDIA `z-ai/glm-5-3-flash`
+  -> failure / invalid decision -> NVIDIA `nvidia/nemotron-3.5-lightning-30b-a3b`
   -> failure -> controlled `503 ROUTER_FAILURE`
 ```
 
-Transport failure is not retried against the same router. A malformed 2xx structured result gets one repair request. A 401/403 blocks that backend for this request without opening its circuit.
+Transport/HTTP failure is not retried against the same router. A malformed 2xx structured result gets one repair request. Each tier's initial request and repair share a single `ROUTER_TIMEOUT` budget (default 10 seconds); the full ladder is therefore bounded to roughly twice that budget. Google sends strict JSON-schema output plus low reasoning effort. NVIDIA sends JSON-object output and disables model thinking. Both use temperature zero and a 128-token cap. A 401/403 blocks that backend for this request without opening its circuit.
 
-Task candidates are sequential and receive at most one call per request. There is no same-model/adapter retry; the engine advances or returns `503 PROVIDER_UNAVAILABLE` after exhaustion. `MAX_RETRIES` instead bounds explicit conversation retry (`retry: true`) and router `RETRY`: the prior successful provider is excluded and the attempt count increments. This prevents retry multiplication.
+Task candidates are sequential and receive at most one call per request, each governed by `REQUEST_TIMEOUT` (default 20 seconds), within the unchanged 60-second `OVERALL_REQUEST_TIMEOUT`. There is no same-model/adapter retry; the engine advances or returns `503 PROVIDER_UNAVAILABLE` after exhaustion. `MAX_RETRIES` (default 3) instead bounds explicit conversation retry (`retry: true`) and router `RETRY`: the prior successful provider is excluded and the attempt count increments. This prevents retry multiplication.
 
 ## Backend circuits
 
@@ -46,7 +46,7 @@ CLOSED -- 3 transient failures --> OPEN -- 30 seconds --> HALF_OPEN
                      failed transient probe -> OPEN
 ```
 
-Defaults are threshold 3, cooldown 30 seconds, one half-open probe. 429/500/502/503/504 (unless model-specific), timeout, and network failure are transient. 400/401/403, schema/format, and model-specific failure are not. An open backend skips all its models. Health snapshots do not mutate state; state resets at process restart.
+Defaults are threshold 3, cooldown 30 seconds, one half-open probe. Backend-wide 5xx, timeout, and network failures are transient. A 429 remains scoped to the attempted model; it does not disable unrelated models. 400/401/403, schema/format, and model-specific failures do not open a backend circuit. An open backend skips all its models. Cancelled or unexpectedly failed probes release their slot; timed-out probes reopen the circuit. Health snapshots do not mutate state; state resets at process restart.
 
 ## Multimodal flow
 
