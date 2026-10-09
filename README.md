@@ -2,6 +2,25 @@
 
 A FastAPI and Streamlit proof of concept that classifies each chat request into a task group, then deterministically executes a resilient, configuration-defined model fallback chain across cloud backends.
 
+## Project snapshot
+
+Static repository facts, verified from the referenced configuration and source files. They are not live-provider measurements.
+
+| Area | Verified value | Source |
+|---|---|---|
+| Automated tests | 105 `test_*` functions | [`tests/`](tests/) |
+| Routing evaluation | 15 fixed prompts; deterministic test-double acceptance threshold: at least 80% capability-strength matching | [`tests/test_routing_evaluation.py`](tests/test_routing_evaluation.py) |
+| Configured backends | 4 | [`.env.example`](.env.example) |
+| Router tiers | 2 (primary and fallback) | [`.env.example`](.env.example) |
+| Primary router | `google` / `gemini-3.8-flash` | [`.env.example`](.env.example) |
+| Fallback router | `nvidia` / `nvidia/nemotron-3.5-lightning-30b-a3b` | [`.env.example`](.env.example) |
+| Explicit retry limit | 3 | [`config/settings.py`](config/settings.py) |
+| Router tier time budget | 10 seconds | [`config/settings.py`](config/settings.py) |
+| Router temperature / output cap | 0 / 128 tokens | [`config/settings.py`](config/settings.py) |
+| Declared API endpoints | 14 | [`api/main.py`](api/main.py) |
+
+The evaluation threshold exercises local selection logic through a deterministic fake router; it is not real Router-LLM routing accuracy or a live-model performance result. The dashboard calculates latency, retry, and fallback metrics only from interactions captured in its current browser session.
+
 ## Quick start
 
 Prerequisites: Python 3.13+ and [uv](https://docs.astral.sh/uv/). There is no Node.js, Docker, database, or separately deployed service requirement.
@@ -192,22 +211,11 @@ curl -X POST http://127.0.0.1:8000/api/v1/chat -H "Content-Type: application/jso
 
 `GET /api/v1/health` provides liveness. `GET /api/v1/router/health` reports router health plus circuit snapshots, and `GET /api/v1/providers/health` reports task-provider health plus circuits. See [API contracts](docs/API_Contracts.md) for every V1/V2 route and schema.
 
-## Current project snapshot
-
-Verified from `.env.example`, route decorators, source layout, and `pytest --collect-only` on 2026-10-06:
-
-- 14 active model configurations: 2 routers and 12 task models.
-- 4 task groups, 4 provider backends, and 4 task fallback chains.
-- 14 API endpoints; 1 shared adapter implementation mapped to 4 backends.
-- 14 test files; test counts are recorded in [Testing strategy](docs/Testing_Strategy.md).
-- 9 Markdown documentation files (root README plus 8 under `docs/`).
-- 3 image formats, 1 image maximum, threshold 3, 30-second cooldown, and 1 half-open probe.
-
 ## Evaluation, dashboard, and status
 
 The dashboard provides session-local records: total/success/failure counts, average/median request latency, retry and fallback rate when diagnostics exist, trends, and developer-mode provider/router distributions. It exports session records as CSV/JSON. It does not persist metrics or establish a scientific provider benchmark.
 
-The local routing-evaluation test uses a deterministic fake router and 15 prompts; it checks at least 80% capability-strength matching. That is a regression check, not a real-model quality/latency claim. The default suite above reported 93% coverage.
+The local routing-evaluation test uses a deterministic fake router and 15 prompts; it checks at least 80% capability-strength matching. That is a regression check, not a real-model quality, accuracy, or latency claim.
 
 Implemented now: V1/V2 contracts, two-tier structured routers, four groups, 12 task candidates, four backends, sequential fallback, shared circuits, opt-in diagnostics, image input, V2 policy/governance, and an API-only dashboard.
 
